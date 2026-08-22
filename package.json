@@ -1,0 +1,10 @@
+{
+  "description": "Core tool modules as standalone WebAssembly. One crate per tool in src/, one wasm per tool in dist/.",
+  "name": "sfw-wasm",
+  "private": true,
+  "scripts": {
+    "build": "node scripts/build.js"
+  },
+  "type": "module",
+  "version": "0.1.0"
+}
