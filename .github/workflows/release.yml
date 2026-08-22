@@ -1,0 +1,42 @@
+name: release
+
+on:
+  push:
+    branches:
+      - master
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: rust (wasm32-unknown-unknown)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+
+      - name: build
+        run: npm run build
+
+      - name: Create release
+        run: |
+          version=$(node -p "require('./package.json').version")
+          tag="v${version}"
+          if gh release view "$tag" &>/dev/null; then
+            echo "Release $tag already exists, skipping"
+            exit 0
+          fi
+          gh release create "$tag" dist/*.wasm \
+            --title "v${version}" \
+            --notes "Built from commit ${GITHUB_SHA::7}."
