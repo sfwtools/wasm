@@ -29,7 +29,7 @@ jobs:
       - name: build
         run: npm run build
 
-      - name: Create release
+      - name: release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
