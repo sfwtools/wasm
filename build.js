@@ -26,13 +26,13 @@ import { homedir }                                                              
 import { join }                                                                    from 'node:path';
 import { fileURLToPath }                                                           from 'node:url';
 
-// --- paths: resolved from the repo root (this file lives in scripts/) -------
+// --- paths: resolved from the repo root (this file lives at the root) -------
 const root = process.cwd();
 const distDir = join(root, 'dist');
 const srcDir = join(root, 'src');
 
 // --- wasm-opt: the binary ships inside the binaryen npm package -------------
-const wasmOpt = join(fileURLToPath(new URL('../', import.meta.url)), 'node_modules', 'binaryen', 'bin', 'wasm-opt');
+const wasmOpt = join(fileURLToPath(new URL('./node_modules/', import.meta.url)), 'binaryen', 'bin', 'wasm-opt');
 
 // --- environment: prepend the user cargo bin so rustup-managed cargo is found
 // regardless of PATH (mirrors how the main sfw.tools build resolves cargo).
