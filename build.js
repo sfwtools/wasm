@@ -21,7 +21,7 @@
 
 // --- imports: Node built-ins + binaryen (ships the wasm-opt binary) ---------
 import { execSync }                                                                from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync }               from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { homedir }                                                                 from 'node:os';
 import { join }                                                                    from 'node:path';
 import { fileURLToPath }                                                           from 'node:url';
@@ -62,6 +62,8 @@ const cargo = (() => {
 
 // --- build loop: one crate per src/<id> dir -> one wasm in dist/<id>.wasm ---
 let count = 0;
+const builtAt = Math.floor(Date.now() / 1000);
+const modules = {};
 
 for(const dir of readdirSync(srcDir)) {
   const crateDir = join(srcDir, dir);
@@ -81,12 +83,17 @@ for(const dir of readdirSync(srcDir)) {
     stdio:'inherit'
   });
 
-  // Read the crate name: it selects the built artifact file below.
+  // Read the crate name and version: they select the built artifact file and
+  // populate the dist manifest below.
   const manifest = readFileSync(manifestPath, 'utf8');
   const crateName = manifest.match(/^name\s*=\s*"([^"]+)"/m)?.[1];
+  const crateVersion = manifest.match(/^version\s*=\s*"([^"]+)"/m)?.[1];
 
   if(!crateName)
     throw new Error('no crate name in ' + manifestPath);
+
+  if(!crateVersion)
+    throw new Error('no version in ' + manifestPath);
 
   // Cargo emits the cdylib under the snake_case crate name (kebab ids get
   // normalized: my-tool -> my_tool.wasm), so the artifact may be `name.wasm`
@@ -110,6 +117,13 @@ for(const dir of readdirSync(srcDir)) {
   });
 
   count++;
+  modules[dir] = {
+    timestamp:builtAt,
+    version:crateVersion
+  };
 }
+
+// --- manifest: record every module, its version, and one build timestamp ----
+writeFileSync(join(distDir, 'wasm.json'), JSON.stringify(modules, null, 2) + '\n');
 
 console.log(new Date().toISOString(), 'build.js', '[build] done (' + count + ' tools)');

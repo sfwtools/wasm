@@ -32,6 +32,9 @@ const VERSION = JSON.parse(readFileSync(join(__dirname, '..', '..', 'package.jso
 const WASM = 'https://github.com/sfwtools/wasm/releases/download/v' + VERSION + '/base64.wasm';
 
 const main = async () => {
+  console.log(new Date().toISOString(), 'test/base64/index.js', 'main', 'version: ' + VERSION);
+  console.log(new Date().toISOString(), 'test/base64/index.js', 'main', 'wasm: ' + WASM);
+
   const response = await fetch(WASM);
 
   if(!response.ok)
@@ -65,6 +68,7 @@ const main = async () => {
 main()
   .catch((err) => {
     console.error(new Date().toISOString(), 'test/base64/index.js', err.message);
+    console.error(new Date().toISOString(), 'test/base64/index.js', '❌ failed');
 
     process.exit(1);
   });
