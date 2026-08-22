@@ -14,19 +14,25 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <http://www.gnu.org/licenses/>.
 
-// Compiles every crate in src/ to dist/<id>.wasm. Cargo reads
+// Compiles every crate in src/ to dist/<id>.wasm, then shrinks each with the
+// wasm-opt binary from binaryen (-Os, bulk-memory enabled: Rust's memcpy emits
+// memory.copy/fill that the feature section doesn't declare). Cargo reads
 // .cargo/config.toml from the working dir, so cargo runs with cwd = the crate.
 
-// --- imports: Node built-ins only (no dependencies) ------------------------
+// --- imports: Node built-ins + binaryen (ships the wasm-opt binary) ---------
 import { execSync }                                                                from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync }                from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync }               from 'node:fs';
 import { homedir }                                                                 from 'node:os';
 import { join }                                                                    from 'node:path';
+import { fileURLToPath }                                                           from 'node:url';
 
 // --- paths: resolved from the repo root (this file lives in scripts/) -------
 const root = process.cwd();
 const distDir = join(root, 'dist');
 const srcDir = join(root, 'src');
+
+// --- wasm-opt: the binary ships inside the binaryen npm package -------------
+const wasmOpt = join(fileURLToPath(new URL('../', import.meta.url)), 'node_modules', 'binaryen', 'bin', 'wasm-opt');
 
 // --- environment: prepend the user cargo bin so rustup-managed cargo is found
 // regardless of PATH (mirrors how the main sfw.tools build resolves cargo).
@@ -95,6 +101,13 @@ for(const dir of readdirSync(srcDir)) {
   // Copy the built module to dist/<id>.wasm (kebab-case id, matching the dir).
   mkdirSync(distDir, { recursive:true });
   cpSync(wasm, join(distDir, dir + '.wasm'));
+
+  // Shrink with wasm-opt -Os. --enable-bulk-memory: Rust's memcpy emits
+  // memory.copy/fill that the module's feature section doesn't declare.
+  const distWasm = join(distDir, dir + '.wasm');
+  execSync(wasmOpt + ' -Os --enable-bulk-memory ' + distWasm + ' -o ' + distWasm, {
+    stdio:'inherit'
+  });
 
   count++;
 }

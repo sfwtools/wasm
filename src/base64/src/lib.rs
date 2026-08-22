@@ -19,13 +19,35 @@
 //! the base64 output from the returned pointer, then `dealloc`s both buffers.
 //! No envelope, no host imports — just `memory`, `alloc`, `dealloc`, `encode`.
 
-use b64::engine::general_purpose::STANDARD;
-use b64::Engine as _;
+/// RFC 4648 standard base64 alphabet.
+const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 /// Pure core: base64-encode a byte slice. The `encode` export is a thin pointer
 /// wrapper around this, so the logic is unit-testable without the ABI.
 pub fn encode_bytes(input: &[u8]) -> String {
-    STANDARD.encode(input)
+    let mut out = String::with_capacity((input.len() + 2) / 3 * 4);
+
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = *chunk.get(1).unwrap_or(&0);
+        let b2 = *chunk.get(2).unwrap_or(&0);
+        let triple = (b0 as u32) << 16 | (b1 as u32) << 8 | b2 as u32;
+
+        out.push(ALPHABET[(triple >> 18) as usize & 63] as char);
+        out.push(ALPHABET[(triple >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 {
+            ALPHABET[(triple >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            ALPHABET[triple as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+
+    out
 }
 
 /// Allocate a write buffer of exactly `len` bytes. The caller passes the

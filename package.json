@@ -1,5 +1,8 @@
 {
   "description": "Core tool modules as standalone WebAssembly. One crate per tool in src/, one wasm per tool in dist/.",
+  "devDependencies": {
+    "binaryen": "^132.0.0"
+  },
   "name": "sfw-wasm",
   "private": true,
   "scripts": {

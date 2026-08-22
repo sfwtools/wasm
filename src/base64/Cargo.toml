@@ -3,13 +3,15 @@ name = "base64"
 version = "0.1.0"
 edition = "2021"
 license = "AGPL-3.0"
-authors = ["Alex Morales", "sfw.tools", "sfwtools.com"]
+authors = ["Alex Morales", "SFWTools"]
 description = "Encode a string to base64."
 
 [lib]
 crate-type = ["cdylib", "rlib"]
 
-[dependencies]
-# Aliased because this crate is itself named `base64`; without the alias the
-# external crate and this crate would both resolve to `base64` in doctests.
-b64 = { package = "base64", version = "0.22" }
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
