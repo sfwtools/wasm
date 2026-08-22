@@ -39,6 +39,6 @@ jobs:
             echo "Release $tag already exists, skipping"
             exit 0
           fi
-          gh release create "$tag" dist/*.wasm \
+          gh release create "$tag" dist/* \
             --title "v${version}" \
             --notes "Built from commit ${GITHUB_SHA::7}."
