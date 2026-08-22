@@ -8,6 +8,18 @@ Built by `npm run build` into `dist/<id>.wasm`.
 | --- | --- | --- |
 | `base64` | base64 | Encode a string to base64. |
 
+## Testing
+
+Each tool has a test in `test/<id>/index.js` that fetches the published release
+of its module from GitHub (the version comes from `package.json`) and checks the
+output through the raw-ABI exports. Run a single tool's test with:
+
+```bash
+node test/base64/index.js
+```
+
+The test exits nonzero on failure.
+
 ## License
 
 Copyright (C) 2026, Alex Morales
