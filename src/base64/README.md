@@ -1,16 +1,61 @@
 # base64
 
-Encode a string to base64.
+Encode and decode bytes in RFC 4648 base64, with a standard or URL-safe
+alphabet.
 
 ## Module
 
 Built by `npm run build` into `dist/base64.wasm`. It exports `memory`,
-`alloc`, `dealloc`, and `encode` — a minimal raw-ABI module, no envelope.
+`alloc`, `dealloc`, `encode`, `decode`, and `manifest` — a minimal raw-ABI
+module, no envelope.
+
+## Manifest
+
+The `manifest()` export returns the module's self-description as UTF-8 JSON,
+packed like every other result (`ptr << 32 | len`). Consumers parse it once
+at load time and drive all exports generically — parameter names, types, legal
+values, and defaults come from the manifest, not from caller code. It carries
+the module `id`, `version`, `description`, and per-export option schemas
+(`type`, `values`, `default`, `description`).
 
 ## Usage
 
-Write the input string into `alloc`'d memory, call `encode`, read the output,
-`dealloc` both buffers. The packed `u64` result is `ptr << 32 | len`.
+Write the input into `alloc`'d memory, call `encode` or `decode`, read the
+output, `dealloc` every buffer. The packed `u64` result is
+`ptr << 32 | len`; a result of `0` means the input or options were invalid.
+
+Both exports take the same shape:
+
+```
+encode(inputPtr, inputLen, optsPtr, optsLen) -> u64
+decode(inputPtr, inputLen, optsPtr, optsLen) -> u64
+```
+
+Pass `optsPtr = 0, optsLen = 0` for defaults.
+
+## Options blob
+
+A flat length-prefixed key/value list, little-endian throughout:
+
+```
+blob  := 0x01 pair*
+pair  := keyLen:u32 keyBytes valueLen:u32 valueBytes   // UTF-8 keys and values
+```
+
+The leading `0x01` magic byte identifies format revision 1; an empty blob
+(0/0) means defaults. Unknown keys are ignored so new callers keep working
+with older cores; a known key with a bad value fails the call (result `0`)
+rather than being silently dropped.
+
+| Key        | Values            | Default     | Applies to |
+| ---------- | ----------------- | ----------- | ---------- |
+| `alphabet` | `standard`, `url` | `standard`  | both       |
+| `padding`  | `true`, `false`   | `true`      | encode     |
+| `wrap`     | column number     | `0` (off)   | encode     |
+
+Decode always ignores ASCII whitespace and accepts padded and unpadded
+input; it rejects characters outside the selected alphabet and impossible
+lengths or padding.
 
 ## License
 
