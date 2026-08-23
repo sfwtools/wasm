@@ -12,11 +12,11 @@ module, no envelope.
 ## Manifest
 
 The `manifest()` export returns the module's self-description as UTF-8 JSON,
-packed like every other result (`ptr << 32 | len`). Consumers parse it once
-at load time and drive all exports generically — parameter names, types, legal
-values, and defaults come from the manifest, not from caller code. It carries
-the module `id`, `version`, `description`, and per-export option schemas
-(`type`, `values`, `default`, `description`).
+packed like every other result (`ptr << 32 | len`). It maps each export to its
+option schemas (`type`, `values`, `default`, `description`) so consumers parse
+it once at load time and drive all exports generically — parameter names,
+types, legal values, and defaults come from the manifest, not from caller
+code.
 
 ## Usage
 

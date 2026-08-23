@@ -28,11 +28,8 @@
 //! it generically without hardcoding its interface.
 
 /// The module's self-description as UTF-8 JSON; `JSON.parse` it on the host
-/// side. The `version` field is kept in sync with Cargo.toml by a test below.
+/// side.
 const MANIFEST: &str = r#"{
-  "id": "base64",
-  "version": "0.1.0",
-  "description": "Encode and decode bytes in RFC 4648 base64.",
   "exports": {
     "encode": {
       "summary": "Encode bytes to base64 text.",
@@ -620,12 +617,5 @@ mod tests {
                 ..Options::default()
             })
         );
-    }
-
-    #[test]
-    fn manifest_version_matches_crate_version() {
-        // The manifest is a hand-written string; this is the tripwire that
-        // keeps its `version` field from drifting away from Cargo.toml.
-        assert!(MANIFEST.contains(env!("CARGO_PKG_VERSION")));
     }
 }

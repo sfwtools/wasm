@@ -132,7 +132,6 @@ const main = async () => {
 
   const manifest = JSON.parse(manifestText);
 
-  expect(manifest.id === 'base64', 'manifest id mismatch: ' + manifest.id);
   expect(manifest.exports && manifest.exports.encode && manifest.exports.decode,
     'manifest does not describe the encode/decode exports');
   expect(manifest.exports.encode.options.alphabet.default === 'standard',
