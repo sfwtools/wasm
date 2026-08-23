@@ -1,10 +1,10 @@
 [package]
 authors = ["Alex Morales", "sfw.tools", "sfwtools.com"]
-description = "Encode a string to base64."
+description = "Create QR codes as SVG from UTF-8 text."
 edition = "2021"
 license = "AGPL-3.0"
-name = "base64"
-version = "0.1.2"
+name = "qr"
+version = "0.1.1"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -13,6 +13,9 @@ crate-type = ["cdylib", "rlib"]
 # Shared raw-ABI transport layer (packing, options blob); compiles into this
 # module's artifact like any other dependency.
 abi = { path = "../abi" }
+# Pure-Rust QR matrix encoder. Rendering features (image/svg of the crate)
+# stay off: this core renders its own minimal SVG from the module matrix.
+qrcode = { version = "0.14", default-features = false }
 
 [profile.release]
 codegen-units = 1

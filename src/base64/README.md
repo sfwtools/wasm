@@ -7,7 +7,8 @@ alphabet.
 
 Built by `npm run build` into `dist/base64.wasm`. It exports `memory`,
 `alloc`, `dealloc`, `encode`, `decode`, and `manifest` — a minimal raw-ABI
-module, no envelope.
+module, no envelope. Buffer packing and options-blob framing come from the
+repo's shared `abi` crate.
 
 ## Manifest
 

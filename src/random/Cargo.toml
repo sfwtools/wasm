@@ -1,17 +1,16 @@
 [package]
 authors = ["Alex Morales", "sfw.tools", "sfwtools.com"]
-description = "Encode a string to base64."
+description = "Generate random ASCII strings (passwords) from host-provided entropy."
 edition = "2021"
 license = "AGPL-3.0"
-name = "base64"
-version = "0.1.2"
+name = "random"
+version = "0.1.1"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-# Shared raw-ABI transport layer (packing, options blob); compiles into this
-# module's artifact like any other dependency.
+# Shared raw-ABI transport layer (packing, options blob, string-array frame).
 abi = { path = "../abi" }
 
 [profile.release]

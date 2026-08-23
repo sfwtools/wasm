@@ -1,0 +1,17 @@
+[package]
+authors = ["Alex Morales", "sfw.tools", "sfwtools.com"]
+description = "The raw-ABI transport helpers every wasm tool module shares: buffer packing, the options blob, and the string-array output frame."
+edition = "2021"
+license = "AGPL-3.0"
+name = "abi"
+version = "0.1.0"
+
+[lib]
+crate-type = ["rlib"]
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true

@@ -26,6 +26,11 @@
 //! default missing ones. See README.md for the wire format. The `manifest`
 //! export returns the module's self-description (JSON) so consumers can call
 //! it generically without hardcoding its interface.
+//!
+//! Buffer packing, blob framing, and the ABI exports' plumbing come from the
+//! shared `abi` crate; only the tool logic lives here.
+
+use abi::{option_pairs, parse_usize};
 
 /// The module's self-description as UTF-8 JSON; `JSON.parse` it on the host
 /// side.
@@ -71,10 +76,6 @@ const STANDARD_ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmno
 
 /// RFC 4648 Section 5 URL-safe alphabet (`-`/`_` instead of `+`/`/`).
 const URL_SAFE_ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-
-/// Magic byte every non-empty options blob must start with, so a format
-/// revision can be detected instead of silently mis-parsed.
-const OPTIONS_MAGIC: u8 = 0x01;
 
 /// Per-call options parsed from the options blob. Missing keys fall back to
 /// these defaults; unknown keys are ignored by design (forward compatibility).
@@ -223,73 +224,16 @@ pub fn decode_bytes(input: &[u8], opts: &Options) -> Result<Vec<u8>, &'static st
     Ok(out)
 }
 
-/// Parse one little-endian `u32` off the front of `blob`, returning it with
-/// the remaining slice.
-fn read_u32(blob: &[u8]) -> Option<(u32, &[u8])> {
-    if blob.len() < 4 {
-        return None;
-    }
-
-    Some((u32::from_le_bytes(blob[..4].try_into().ok()?), &blob[4..]))
-}
-
-/// ASCII-decimal `usize` over raw bytes — replaces `str::parse`, which drags
-/// integer-parsing error machinery into the module. Overflow or a non-digit
-/// is simply no value.
-fn parse_usize(bytes: &[u8]) -> Option<usize> {
-    if bytes.is_empty() {
-        return None;
-    }
-
-    let mut value = 0usize;
-
-    for &digit in bytes {
-        if !digit.is_ascii_digit() {
-            return None;
-        }
-
-        value = value.checked_mul(10)?.checked_add((digit - b'0') as usize)?;
-    }
-
-    Some(value)
-}
-
-/// Parse the options blob straight into resolved `Options` in one pass. An
-/// empty blob means "no options"; otherwise the magic byte is required.
-/// Unknown keys are ignored so new callers stay compatible with older cores;
-/// known keys with bad values are errors, because silently dropping a
-/// requested option could corrupt results. Returns `None` when the blob is
-/// truncated, malformed, or carries an unusable value.
-fn resolve_options(mut blob: &[u8]) -> Option<Options> {
-    if blob.is_empty() {
-        return Some(Options::default());
-    }
-
-    if blob[0] != OPTIONS_MAGIC {
-        return None;
-    }
-
-    blob = &blob[1..];
+/// Parse the options blob straight into resolved `Options`. Framing (magic
+/// byte, length prefixes) is validated by the shared `option_pairs`; unknown
+/// keys are ignored so new callers stay compatible with older cores; known
+/// keys with bad values are errors, because silently dropping a requested
+/// option could corrupt results. Returns `None` when the blob is malformed
+/// or carries an unusable value.
+fn resolve_options(blob: &[u8]) -> Option<Options> {
     let mut opts = Options::default();
 
-    while !blob.is_empty() {
-        let (key_len, after_key_len) = read_u32(blob)?;
-        let key_len = key_len as usize;
-
-        if after_key_len.len() < key_len {
-            return None;
-        }
-
-        let (key, after_key) = after_key_len.split_at(key_len);
-        let (value_len, after_value_len) = read_u32(after_key)?;
-        let value_len = value_len as usize;
-
-        if after_value_len.len() < value_len {
-            return None;
-        }
-
-        let (value, tail) = after_value_len.split_at(value_len);
-
+    for (key, value) in option_pairs(blob)? {
         match key {
             b"alphabet" => match value {
                 b"standard" => opts.url_safe = false,
@@ -307,25 +251,9 @@ fn resolve_options(mut blob: &[u8]) -> Option<Options> {
             },
             _ => {}
         }
-
-        blob = tail;
     }
 
     Some(opts)
-}
-
-/// Pack an owned byte vector as the exported `ptr << 32 | len` result,
-/// leaking an exact-length allocation whose layout matches what `dealloc`
-/// reconstructs.
-fn pack(bytes: Vec<u8>) -> u64 {
-    let boxed: Box<[u8]> = bytes.into_boxed_slice();
-    let len = boxed.len();
-    let mut boxed = boxed;
-    let ptr = boxed.as_mut_ptr() as u64;
-
-    std::mem::forget(boxed);
-
-    ptr << 32 | len as u64
 }
 
 /// Allocate a write buffer of exactly `len` bytes. The caller passes the
@@ -336,12 +264,7 @@ fn pack(bytes: Vec<u8>) -> u64 {
 /// must be released with `dealloc`.
 #[no_mangle]
 pub unsafe extern "C" fn alloc(len: u32) -> u32 {
-    let mut buf: Vec<u8> = Vec::with_capacity(len as usize);
-    let ptr = buf.as_mut_ptr() as u32;
-
-    std::mem::forget(buf);
-
-    ptr
+    abi::alloc_buf(len)
 }
 
 /// Free a buffer previously handed out by `alloc`.
@@ -350,9 +273,7 @@ pub unsafe extern "C" fn alloc(len: u32) -> u32 {
 /// `ptr`/`len` must come from `alloc` and must not have been freed before.
 #[no_mangle]
 pub unsafe extern "C" fn dealloc(ptr: u32, len: u32) {
-    let buf = Vec::from_raw_parts(ptr as *mut u8, len as usize, len as usize);
-
-    drop(buf);
+    abi::free_buf(ptr, len)
 }
 
 /// Encode the input bytes at `ptr..ptr+len` as base64 and return the output
@@ -368,13 +289,13 @@ pub unsafe extern "C" fn encode(ptr: u32, len: u32, opts_ptr: u32, opts_len: u32
     let input = std::slice::from_raw_parts(ptr as *const u8, len as usize);
 
     if opts_len == 0 {
-        return pack(encode_bytes(input, &Options::default()).into_bytes());
+        return abi::pack(encode_bytes(input, &Options::default()).into_bytes());
     }
 
     let blob = std::slice::from_raw_parts(opts_ptr as *const u8, opts_len as usize);
 
     match resolve_options(blob) {
-        Some(opts) => pack(encode_bytes(input, &opts).into_bytes()),
+        Some(opts) => abi::pack(encode_bytes(input, &opts).into_bytes()),
         None => 0,
     }
 }
@@ -393,7 +314,7 @@ pub unsafe extern "C" fn decode(ptr: u32, len: u32, opts_ptr: u32, opts_len: u32
 
     if opts_len == 0 {
         return match decode_bytes(input, &Options::default()) {
-            Ok(bytes) => pack(bytes),
+            Ok(bytes) => abi::pack(bytes),
             Err(_) => 0,
         };
     }
@@ -402,7 +323,7 @@ pub unsafe extern "C" fn decode(ptr: u32, len: u32, opts_ptr: u32, opts_len: u32
 
     match resolve_options(blob) {
         Some(opts) => match decode_bytes(input, &opts) {
-            Ok(bytes) => pack(bytes),
+            Ok(bytes) => abi::pack(bytes),
             Err(_) => 0,
         },
         None => 0,
@@ -413,12 +334,13 @@ pub unsafe extern "C" fn decode(ptr: u32, len: u32, opts_ptr: u32, opts_len: u32
 /// text, then deallocs the buffer.
 #[no_mangle]
 pub unsafe extern "C" fn manifest() -> u64 {
-    pack(MANIFEST.as_bytes().to_vec())
+    abi::pack(MANIFEST.as_bytes().to_vec())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use abi::OPTIONS_MAGIC;
 
     /// Build one wire-format pair, matching `resolve_options` expectations.
     fn pair(key: &str, value: &str) -> Vec<u8> {

@@ -15,13 +15,15 @@
 // along with this program. If not, see <http://www.gnu.org/licenses/>.
 
 // Runs the published base64 module (GitHub release) through the raw-ABI
-// exports — encode/decode across the option combinations — and checks the
+// exports - encode/decode across the option combinations - and checks the
 // outputs. Exits nonzero on failure.
 
-// --- imports: Node built-ins only (no dependencies) ------------------------
+// --- imports: Node built-ins + the shared host helpers ----------------------
 import { readFileSync }  from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+import { runExport, unpack }  from '../util.js';
 
 // --- module globals: CommonJS-style path helpers derived from import.meta ---
 const __filename = fileURLToPath(import.meta.url);
@@ -31,78 +33,6 @@ const __dirname  = dirname(__filename);
 const INPUT = 'sfw.tools';
 const VERSION = JSON.parse(readFileSync(join(__dirname, '..', '..', 'package.json'), 'utf8')).version;
 const WASM = 'https://github.com/sfwtools/wasm/releases/download/v' + VERSION + '/base64.wasm';
-
-// Serialize a plain object into the module's options-blob wire format:
-// 0x01 magic, then keyLen/key/valueLen/value pairs with little-endian u32
-// lengths (see src/base64/README.md).
-const encodeOptions = (options) => {
-  const encoder = new TextEncoder();
-  const chunks = [Uint8Array.of(0x01)];
-
-  for(const [key, value] of Object.entries(options)) {
-    const keyBytes = encoder.encode(key);
-    const valueBytes = encoder.encode(String(value));
-    const chunk = new Uint8Array(4 + keyBytes.length + 4 + valueBytes.length);
-    const view = new DataView(chunk.buffer);
-
-    view.setUint32(0, keyBytes.length, true);
-    chunk.set(keyBytes, 4);
-    view.setUint32(4 + keyBytes.length, valueBytes.length, true);
-    chunk.set(valueBytes, 8 + keyBytes.length);
-
-    chunks.push(chunk);
-  }
-
-  const blob = new Uint8Array(chunks.reduce((sum, chunk) => sum + chunk.length, 0));
-  let offset = 0;
-
-  for(const chunk of chunks) {
-    blob.set(chunk, offset);
-    offset += chunk.length;
-  }
-
-  return blob;
-};
-
-// Copy an output out of linear memory before anything can move or free it.
-// Returns { bytes, len, ptr } so the caller can dealloc afterwards.
-const unpack = (memory, packed) => {
-  const outPtr = Number(packed >> 32n);
-  const outLen = Number(packed & 0xFFFFFFFFn);
-
-  return {
-    bytes: new Uint8Array(memory.buffer, outPtr, outLen).slice(),
-    len: outLen,
-    ptr: outPtr
-  };
-};
-
-// Call one export end to end: write input (+ options) into alloc'd memory,
-// unpack the ptr<<32|len result, copy the output out, dealloc everything.
-// Returns the output bytes, or null when the module rejected the call (0).
-const runExport = (exports, name, input, options) => {
-  const optionsBlob = options ? encodeOptions(options) : new Uint8Array(0);
-  const inPtr = exports.alloc(input.length);
-  const optsPtr = optionsBlob.length ? exports.alloc(optionsBlob.length) : 0;
-
-  new Uint8Array(exports.memory.buffer, inPtr, input.length).set(input);
-
-  if(optionsBlob.length)
-    new Uint8Array(exports.memory.buffer, optsPtr, optionsBlob.length).set(optionsBlob);
-
-  const packed = exports[name](inPtr, input.length, optsPtr, optionsBlob.length);
-  const result = packed === 0n ? null : unpack(exports.memory, packed);
-
-  exports.dealloc(inPtr, input.length);
-
-  if(optionsBlob.length)
-    exports.dealloc(optsPtr, optionsBlob.length);
-
-  if(result)
-    exports.dealloc(result.ptr, result.len);
-
-  return result ? result.bytes : null;
-};
 
 const expect = (condition, message) => {
   if(!condition)
@@ -182,13 +112,13 @@ const main = async () => {
   expect(withUnknown && new TextDecoder().decode(withUnknown) === expected,
     'unknown option broke encoding');
 
-  console.log(new Date().toISOString(), 'test/base64/index.js', 'main', '✅ ok');
+  console.log(new Date().toISOString(), 'test/base64/index.js', 'main', '\u2705 ok');
 };
 
 main()
   .catch((err) => {
     console.error(new Date().toISOString(), 'test/base64/index.js', err.message);
-    console.error(new Date().toISOString(), 'test/base64/index.js', '❌ failed');
+    console.error(new Date().toISOString(), 'test/base64/index.js', '\u274c failed');
 
     process.exit(1);
   });

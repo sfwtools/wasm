@@ -7,8 +7,8 @@ name = "abi"
 version = "0.1.0"
 
 [[package]]
-name = "base64"
-version = "0.1.2"
+name = "random"
+version = "0.1.1"
 dependencies = [
  "abi",
 ]

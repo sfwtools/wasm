@@ -69,9 +69,20 @@ for(const dir of readdirSync(srcDir)) {
   const crateDir = join(srcDir, dir);
   const manifestPath = join(crateDir, 'Cargo.toml');
 
-  // non-crate dirs (none today) are skipped
+  // non-crate dirs are skipped
   if(!existsSync(manifestPath))
     continue;
+
+  // Helper crates (src/abi) link INTO the modules instead of shipping one:
+  // only crate-type lists containing "cdylib" produce a wasm artifact.
+  const manifest = readFileSync(manifestPath, 'utf8');
+  const crateType = manifest.match(/^crate-type\s*=\s*\[([^\]]*)\]/m)?.[1] ?? '';
+
+  if(!crateType.includes('cdylib')) {
+    console.log(new Date().toISOString(), 'build.js', '[skip] ' + dir + ' (no cdylib)');
+
+    continue;
+  }
 
   console.log(new Date().toISOString(), 'build.js', '[build] ' + dir);
 
@@ -83,9 +94,8 @@ for(const dir of readdirSync(srcDir)) {
     stdio:'inherit'
   });
 
-  // Read the crate name and version: they select the built artifact file and
-  // populate the dist manifest below.
-  const manifest = readFileSync(manifestPath, 'utf8');
+  // The crate name and version select the built artifact file and populate
+  // the dist manifest below.
   const crateName = manifest.match(/^name\s*=\s*"([^"]+)"/m)?.[1];
   const crateVersion = manifest.match(/^version\s*=\s*"([^"]+)"/m)?.[1];
 
