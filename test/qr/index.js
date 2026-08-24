@@ -14,16 +14,17 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <http://www.gnu.org/licenses/>.
 
-// Runs the published qr module (GitHub release) through the raw-ABI exports -
-// SVG creation across the option combinations - and checks the outputs.
-// Exits nonzero on failure.
+// Runs the published image and qr modules (GitHub release) through the raw-ABI
+// exports: SVG encoding across option combinations, then the double-call read
+// path where image.decode hands a pixel frame to qr.decode. Exits nonzero on
+// failure.
 
 // --- imports: Node built-ins + the shared host helpers ----------------------
 import { readFileSync }  from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { runExport, unpack }  from '../util.js';
+import { parseFrame, parsePixels, runExport, unpack }  from '../util.js';
 
 // --- module globals: CommonJS-style path helpers derived from import.meta ---
 const __filename = fileURLToPath(import.meta.url);
@@ -31,47 +32,62 @@ const __dirname  = dirname(__filename);
 
 // --- configuration: only what the operator tweaks --------------------------
 const VERSION = JSON.parse(readFileSync(join(__dirname, '..', '..', 'package.json'), 'utf8')).version;
-const WASM = 'https://github.com/sfwtools/wasm/releases/download/v' + VERSION + '/qr.wasm';
+const RELEASE = 'https://github.com/sfwtools/wasm/releases/download/v' + VERSION;
 
 const expect = (condition, message) => {
   if(!condition)
     throw new Error(message);
 };
 
-const main = async () => {
-  console.log(new Date().toISOString(), 'test/qr/index.js', 'main', 'version: ' + VERSION);
-  console.log(new Date().toISOString(), 'test/qr/index.js', 'main', 'wasm: ' + WASM);
+const loadModule = async (name) => {
+  const url = RELEASE + '/' + name + '.wasm';
 
-  const response = await fetch(WASM);
+  console.log(new Date().toISOString(), 'test/qr/index.js', 'loadModule', 'wasm: ' + url);
+
+  const response = await fetch(url);
 
   if(!response.ok)
     throw new Error('fetch failed: ' + response.status);
 
-  const bytes = await response.arrayBuffer();
-  const { instance } = await WebAssembly.instantiate(bytes, {});
+  const { instance } = await WebAssembly.instantiate(await response.arrayBuffer(), {});
 
-  // First order of business: read the module's self-description and show it.
-  // The manifest is the debug ground truth for everything this test does next.
-  const manifestResult = unpack(instance.exports.memory, instance.exports.manifest());
-  const manifestText = new TextDecoder().decode(manifestResult.bytes);
+  return instance.exports;
+};
 
-  instance.exports.dealloc(manifestResult.ptr, manifestResult.len);
+const main = async () => {
+  console.log(new Date().toISOString(), 'test/qr/index.js', 'main', 'version: ' + VERSION);
 
-  console.log(new Date().toISOString(), 'test/qr/index.js', 'main', 'manifest: ' + manifestText);
+  const imageExports = await loadModule('image');
+  const qrExports = await loadModule('qr');
 
-  const manifest = JSON.parse(manifestText);
+  // First order of business: read both self-descriptions and show them.
+  const readManifest = (exports) => {
+    const result = unpack(exports.memory, exports.manifest());
 
-  expect(manifest.exports && manifest.exports.create,
-    'manifest does not describe the create export');
-  expect(manifest.exports.create.options.ecc.values.join(',') === 'L,M,Q,H',
-    'manifest ecc values mismatch');
-  expect(manifest.exports.create.options.ecc.default === 'M',
-    'manifest default ecc mismatch');
+    exports.dealloc(result.ptr, result.len);
+
+    return JSON.parse(new TextDecoder().decode(result.bytes));
+  };
+
+  const imageManifest = readManifest(imageExports);
+  const qrManifest = readManifest(qrExports);
+
+  console.log(new Date().toISOString(), 'test/qr/index.js', 'main', 'image manifest: ' + JSON.stringify(imageManifest));
+  console.log(new Date().toISOString(), 'test/qr/index.js', 'main', 'qr manifest: ' + JSON.stringify(qrManifest));
+
+  expect(imageManifest.exports.decode && imageManifest.exports.decode.output === 'pixels',
+    'image manifest does not mark decode as pixels output');
+  expect(imageManifest.exports.decode.options.color.values.join(',') === 'luma,rgba',
+    'image manifest color values mismatch');
+  expect(qrManifest.exports.encode && qrManifest.exports.encode.options.ecc.default === 'M',
+    'manifest does not describe the encode export');
+  expect(qrManifest.exports.decode && qrManifest.exports.decode.output === 'string-array',
+    'manifest does not mark decode as string-array output');
 
   // Defaults produce a standalone SVG whose canvas matches the geometry:
   // "sfw.tools" encodes as version 1 (21 modules), margin 4, scale 4 -> 116.
   const input = new TextEncoder().encode('sfw.tools');
-  const svg = new TextDecoder().decode(runExport(instance.exports, 'create', input, undefined));
+  const svg = new TextDecoder().decode(runExport(qrExports, 'encode', input, undefined));
 
   expect(svg.startsWith('<?xml'), 'svg lacks an xml declaration');
   expect(svg.includes('<svg xmlns="http://www.w3.org/2000/svg"'), 'svg root is wrong');
@@ -80,30 +96,65 @@ const main = async () => {
   expect(svg.endsWith('</svg>\n'), 'svg does not close cleanly');
 
   // Custom options resize the canvas and still close cleanly.
-  const custom = new TextDecoder().decode(runExport(instance.exports, 'create',
-    new TextEncoder().encode('hi'), { ecc:'H', scale:'2', margin:'0' }));
+  const custom = new TextDecoder().decode(runExport(qrExports, 'encode',
+    new TextEncoder().encode('hi'), {
+      ecc:'H',
+      margin:'0',
+      scale:'2'
+    }));
 
   // "hi" at H level also fits version 1: 21 modules * scale 2 = 42.
   expect(custom.includes('viewBox="0 0 42 42"'), 'custom options viewBox wrong');
 
   // Empty input is rejected rather than rendered as an empty code.
-  expect(runExport(instance.exports, 'create', new TextEncoder().encode(''), undefined) === null,
+  expect(runExport(qrExports, 'encode', new TextEncoder().encode(''), undefined) === null,
     'empty input was not rejected');
 
   // Text that cannot fit any QR code is rejected cleanly.
-  expect(runExport(instance.exports, 'create',
+  expect(runExport(qrExports, 'encode',
     new TextEncoder().encode('x'.repeat(70000)), undefined) === null,
     'oversized input was not rejected');
 
   // Invalid UTF-8 input is rejected rather than encoded loosely.
-  expect(runExport(instance.exports, 'create', Uint8Array.of(0xFF, 0xFE), undefined) === null,
+  expect(runExport(qrExports, 'encode', Uint8Array.of(0xFF, 0xFE), undefined) === null,
     'invalid utf-8 was not rejected');
 
   // Unknown options are ignored by design.
   const withUnknown = new TextDecoder().decode(
-    runExport(instance.exports, 'create', input, { future:'whatever' }));
+    runExport(qrExports, 'encode', input, { future:'whatever' }));
 
   expect(withUnknown === svg, 'unknown option changed the output');
+
+  // The double-call read path: PNG bytes -> image.decode -> pixel frame ->
+  // qr.decode -> payloads. The committed fixture is a clean screenshot-style
+  // PNG of "https://sfw.tools/qr".
+  const fixture = new Uint8Array(readFileSync(join(__dirname, 'sfw.tools.png')));
+  const frame = runExport(imageExports, 'decode', fixture, undefined);
+
+  expect(frame !== null, 'image.decode rejected the fixture');
+
+  const decoded = parsePixels(frame);
+
+  expect(decoded.channels === 1 && decoded.width > 0 && decoded.height > 0,
+    'unexpected pixel frame shape');
+
+  const payloads = parseFrame(runExport(qrExports, 'decode', frame, undefined));
+
+  expect(payloads.length === 1 && payloads[0] === 'https://sfw.tools/qr',
+    'fixture decode payload mismatch: ' + JSON.stringify(payloads));
+
+  // qr.decode refuses RGBA frames: it only takes grayscale.
+  const rgbaFrame = runExport(imageExports, 'decode', fixture, { color:'rgba' });
+
+  expect(rgbaFrame !== null, 'rgba decode failed');
+  expect(runExport(qrExports, 'decode', rgbaFrame, undefined) === null,
+    'decode accepted a rgba frame');
+
+  // Garbage is rejected at each stage instead of throwing or inventing data.
+  expect(runExport(imageExports, 'decode', new TextEncoder().encode('not an image'), undefined) === null,
+    'garbage input was not rejected');
+  expect(runExport(qrExports, 'decode', new TextEncoder().encode('not a frame'), undefined) === null,
+    'bad frame was not rejected');
 
   console.log(new Date().toISOString(), 'test/qr/index.js', 'main', '\u2705 ok');
 };

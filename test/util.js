@@ -111,3 +111,23 @@ export const parseFrame = (frame) => {
 
   return strings;
 };
+
+// Walk the pixel frame produced by image.decode: little-endian u32 width and
+// height, one channel byte (1 = luma, 4 = RGBA), then row-major samples.
+export const parsePixels = (frame) => {
+  const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
+  const width = view.getUint32(0, true);
+  const height = view.getUint32(4, true);
+  const channels = frame[8];
+  const expected = width * height * channels;
+
+  if(frame.byteLength !== 9 + expected || expected === 0)
+    throw new Error('pixel frame length mismatch');
+
+  return {
+    channels,
+    height,
+    pixels: frame.subarray(9),
+    width
+  };
+};

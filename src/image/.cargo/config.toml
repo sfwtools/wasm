@@ -1,0 +1,5 @@
+# Every module must export its linear memory so a host can read/write the
+# input/output buffers. Scoped to the wasm target only; native builds must NOT
+# pass these flags.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "link-arg=--export-memory"]

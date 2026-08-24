@@ -1,0 +1,33 @@
+[package]
+authors = ["Alex Morales", "sfw.tools", "sfwtools.com"]
+description = "Decode PNG and JPEG images into raw pixel frames."
+edition = "2021"
+license = "AGPL-3.0"
+name = "image"
+version = "0.1.0"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+# No doctests exist here; without this, rustdoc receives two `--extern image=`
+# candidates (this package and the crates.io dependency) and refuses to run.
+doctest = false
+
+[dependencies]
+# Shared raw-ABI transport layer (packing, pixel frame); compiles into this
+# module's artifact like any other dependency.
+abi = { path = "../abi" }
+# Input decoding: PNG (screenshots) + JPEG (phone photos), all other formats
+# off so the artifact stays as small as the set allows. Encoding is not
+# enabled; this module only turns files into pixels.
+#
+# Pinned to exactly 0.25.5: newer 0.25.x pulls moxcms/pxfm (ICC color
+# management) unconditionally, costing ~68 KB for transforms we never ask
+# for; embedded ICC profiles are ignored, which is fine for QR sources.
+image = { version = "=0.25.5", default-features = false, features = ["png", "jpeg"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true

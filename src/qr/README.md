@@ -1,41 +1,55 @@
 # qr
 
-Create QR codes as SVG from UTF-8 text.
+Encode UTF-8 text as QR code SVG, read QR codes back from images.
 
 ## Module
 
 Built by `npm run build` into `dist/qr.wasm`. It exports `memory`,
-`alloc`, `dealloc`, `create`, and `manifest` - a minimal raw-ABI module,
-no envelope. Buffer packing and options-blob framing come from the repo's
-shared `abi` crate.
+`alloc`, `dealloc`, `encode`, `decode`, and `manifest` - a minimal raw-ABI
+module, no envelope. Buffer packing, options-blob framing, the pixel-frame
+parser, and the string-array output frame come from the repo's shared `abi`
+crate.
 
-The matrix encoding uses the pure-Rust `qrcode` crate with its rendering
-features off; this core renders its own minimal SVG (white background, black
-modules, integer coordinates, `shape-rendering="crispEdges"`) so the output
-is one predictable shape. Dark modules in a row merge into single rects.
+Encoding uses the pure-Rust `qrcode` crate with its rendering features off;
+this core renders its own minimal SVG (white background, black modules,
+integer coordinates, `shape-rendering="crispEdges"`) so the output is one
+predictable shape. Dark modules in a row merge into single rects.
 
-Reading QR images is deliberately out of scope for now: decoding is image
-processing, a different problem than encoding.
+Decoding uses `rqrr` (finder-pattern detection, perspective handling, ECC)
+over a raw luma pixel frame. File-format decoding lives in the separate
+`image` module: hosts chain the calls (`image.decode` then `qr.decode`). The
+name pairs with `encode` like base64 does; it deliberately is not `read`,
+because a `#[no_mangle] extern "C"` symbol named `read` interposes
+libSystem's own `read(2)` on Darwin and segfaults hosts at their first
+stdout write - avoid libc-reserved names for exports everywhere. Every QR
+code found in the frame contributes one payload; codes damaged beyond ECC
+are skipped rather than failing the whole frame.
 
 ## Manifest
 
 The `manifest()` export returns the module's self-description as UTF-8 JSON,
 packed like every other result (`ptr << 32 | len`). It maps each export to
-its option schemas (`type`, `values`, `default`, `description`) so consumers
-parse it once at load time and drive all exports generically.
+its option schemas (`type`, `values`, `default`, `description`) and marks
+`decode` with `"output": "string-array"`, so consumers parse it once at load
+time and drive all exports generically.
 
 ## Usage
 
-Write the UTF-8 text into `alloc`'d memory, call `create`, read the output,
-`dealloc` every buffer. The packed `u64` result is `ptr << 32 | len`; a
-result of `0` means the input or options were invalid, or the text does not
-fit a QR code at the chosen error correction level.
+Write the input bytes into `alloc`'d memory, call the export, read the
+output, `dealloc` every buffer. The packed `u64` result is
+`ptr << 32 | len`; a result of `0` means the input or options were invalid.
 
 ```
-create(inputPtr, inputLen, optsPtr, optsLen) -> u64
+encode(inputPtr, inputLen, optsPtr, optsLen) -> u64   // SVG document
+decode(inputPtr, inputLen, optsPtr, optsLen) -> u64   // string-array frame
 ```
 
-Pass `optsPtr = 0, optsLen = 0` for defaults.
+Pass `optsPtr = 0, optsLen = 0` for defaults. `encode` takes UTF-8 text and
+returns a standalone SVG document. `decode` takes the pixel frame produced by
+`image.decode` (`width:u32 height:u32 channels:u8 samples`, little-endian,
+row-major, luma only) and returns the string-array frame (magic byte, count,
+length-prefixed UTF-8 entries), one entry per QR code found in the frame.
+A malformed frame or one without any readable code rejects the call.
 
 ## Options blob
 
@@ -49,7 +63,9 @@ pair  := keyLen:u32 keyBytes valueLen:u32 valueBytes   // UTF-8 keys and values
 The leading `0x01` magic byte identifies format revision 1; an empty blob
 (0/0) means defaults. Unknown keys are ignored so new callers keep working
 with older cores; a known key with a bad value fails the call (result `0`)
-rather than being silently dropped.
+rather than being silently dropped. `decode` takes no options today; its
+blob is walked only for framing validation so a future option can appear
+without breaking callers. `decode` takes no options today.
 
 | Key      | Values            | Default | Description                                        |
 | -------- | ----------------- | ------- | -------------------------------------------------- |
@@ -59,8 +75,8 @@ rather than being silently dropped.
 
 ## Output
 
-A standalone SVG document (`<?xml ...?>` header included), safe to save as
-`.svg` and open anywhere:
+`encode` produces a standalone SVG document (`<?xml ...?>` header included),
+safe to save as `.svg` and open anywhere:
 
 ```xml
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 W H" width="W" height="H" shape-rendering="crispEdges">
@@ -68,6 +84,9 @@ A standalone SVG document (`<?xml ...?>` header included), safe to save as
   <rect x="..." y="..." width="..." height="..."/>
 </svg>
 ```
+
+`decode` produces a string-array frame of payloads in reading order, e.g.
+one code in the frame yields exactly one entry.
 
 ## License
 

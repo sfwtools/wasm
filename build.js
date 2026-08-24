@@ -121,8 +121,10 @@ for(const dir of readdirSync(srcDir)) {
 
   // Shrink with wasm-opt -Os. --enable-bulk-memory: Rust's memcpy emits
   // memory.copy/fill that the module's feature section doesn't declare.
+  // --enable-nontrapping-float-to-int: Rust's saturating float->int casts
+  // (image math) emit trunc_sat, same undeclared-feature situation.
   const distWasm = join(distDir, dir + '.wasm');
-  execSync(wasmOpt + ' -Os --enable-bulk-memory ' + distWasm + ' -o ' + distWasm, {
+  execSync(wasmOpt + ' -Os --enable-bulk-memory --enable-nontrapping-float-to-int ' + distWasm + ' -o ' + distWasm, {
     stdio:'inherit'
   });
 

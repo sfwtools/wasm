@@ -14,12 +14,15 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <http://www.gnu.org/licenses/>.
 
-//! qr - create QR codes as SVG from UTF-8 text.
+//! qr - encode UTF-8 text as QR code SVG, read QR codes back from images.
 //!
-//! The matrix encoding rides on the pure-Rust `qrcode` crate (rendering
-//! features off); this core renders its own minimal SVG from the module
-//! matrix so output stays one predictable shape: white background, black
-//! modules, integer coordinates, `shape-rendering="crispEdges"`.
+//! Encoding rides on the pure-Rust `qrcode` crate (rendering features off);
+//! this core renders its own minimal SVG from the module matrix so output
+//! stays one predictable shape: white background, black modules, integer
+//! coordinates, `shape-rendering="crispEdges"`. Decoding rides on `rqrr`
+//! (pattern detection + ECC) over a raw luma pixel frame - produced by the
+//! separate `image` module from PNG/JPEG files - and every payload found is
+//! reported.
 //!
 //! Options travel as the house options blob (see README.md): `0x01` magic,
 //! little-endian length-prefixed UTF-8 key/value pairs; unknown keys ignored,
@@ -28,14 +31,14 @@
 //! Buffer packing and blob framing come from the shared `abi` crate; only the
 //! tool logic lives here.
 
-use abi::{option_pairs, parse_usize};
+use abi::{option_pairs, parse_pixels, parse_usize};
 
 /// The module's self-description as UTF-8 JSON; `JSON.parse` it on the host
 /// side.
 const MANIFEST: &str = r#"{
   "exports": {
-    "create": {
-      "summary": "Create a QR code as SVG from UTF-8 text.",
+    "encode": {
+      "summary": "Encode UTF-8 text as a QR code SVG.",
       "options": {
         "ecc": {
           "type": "enum",
@@ -54,6 +57,10 @@ const MANIFEST: &str = r#"{
           "description": "Quiet-zone margin around the code, in modules (0-32)."
         }
       }
+    },
+    "decode": {
+      "summary": "Decode QR payloads from a raw luma pixel frame.",
+      "output": "string-array"
     }
   }
 }"#;
@@ -108,7 +115,7 @@ impl Ecc {
 }
 
 /// Encode `text` into a QR matrix at the requested ECC level.
-fn encode(text: &str, ecc: &Ecc) -> Result<qrcode::QrCode, qrcode::types::QrError> {
+fn encode_matrix(text: &str, ecc: &Ecc) -> Result<qrcode::QrCode, qrcode::types::QrError> {
     let level = match ecc {
         Ecc::L => qrcode::types::EcLevel::L,
         Ecc::M => qrcode::types::EcLevel::M,
@@ -165,9 +172,9 @@ fn render_svg(code: &qrcode::QrCode, opts: &Options) -> String {
     svg
 }
 
-/// Create the SVG payload for `text` under `opts`. Errors name the cause for
+/// Encode the SVG payload for `text` under `opts`. Errors name the cause for
 /// hosts that surface them (the ABI itself just returns 0).
-pub fn create_svg(text: &str, opts: &Options) -> Result<String, &'static str> {
+pub fn encode_svg(text: &str, opts: &Options) -> Result<String, &'static str> {
     if text.is_empty() {
         return Err("input text is empty");
     }
@@ -180,9 +187,40 @@ pub fn create_svg(text: &str, opts: &Options) -> Result<String, &'static str> {
         return Err("margin must be between 0 and 32");
     }
 
-    let code = encode(text, &opts.ecc).map_err(|_| "the text does not fit a QR code at this error correction level")?;
+    let code = encode_matrix(text, &opts.ecc).map_err(|_| "the text does not fit a QR code at this error correction level")?;
 
     Ok(render_svg(&code, opts))
+}
+
+/// Decode every QR payload found in a raw luma pixel frame (see README.md).
+/// Payloads are UTF-8 text; codes whose payload fails to decode (damaged
+/// beyond ECC) are skipped rather than failing the whole image. An error is
+/// returned when nothing readable was found at all.
+pub fn read_frame(frame: &[u8]) -> Result<Vec<String>, &'static str> {
+    let (width, height, channels, pixels) =
+        parse_pixels(frame).ok_or("the input is not a valid pixel frame")?;
+
+    if channels != 1 {
+        return Err("the pixel frame must be grayscale (1 channel)");
+    }
+
+    let stride = width as usize;
+    let mut prepared = rqrr::PreparedImage::prepare_from_greyscale(width as usize, height as usize, |x, y| {
+        pixels[y * stride + x]
+    });
+    let mut payloads: Vec<String> = Vec::new();
+
+    for grid in prepared.detect_grids() {
+        if let Ok((_meta, text)) = grid.decode() {
+            payloads.push(text);
+        }
+    }
+
+    if payloads.is_empty() {
+        return Err("no QR code found in the image");
+    }
+
+    Ok(payloads)
 }
 
 /// Parse the options blob straight into resolved `Options`. Framing (magic
@@ -235,8 +273,8 @@ pub unsafe extern "C" fn dealloc(ptr: u32, len: u32) {
     abi::free_buf(ptr, len)
 }
 
-/// Create a QR code for the UTF-8 text at `ptr..ptr+len` and return the SVG
-/// document packed as `ptr << 32 | len`. Options come from the blob at
+/// Encode the UTF-8 text at `ptr..ptr+len` as a QR code SVG returned packed
+/// as `ptr << 32 | len`. Options come from the blob at
 /// `opts_ptr..opts_ptr+opts_len` (pass 0/0 for defaults); empty input, a
 /// malformed blob, an unusable option value, or text that does not fit the
 /// chosen error correction level returns 0. The caller reads the output and
@@ -245,7 +283,7 @@ pub unsafe extern "C" fn dealloc(ptr: u32, len: u32) {
 /// # Safety
 /// All pointers must reference this module's linear memory with exact lengths.
 #[no_mangle]
-pub unsafe extern "C" fn create(ptr: u32, len: u32, opts_ptr: u32, opts_len: u32) -> u64 {
+pub unsafe extern "C" fn encode(ptr: u32, len: u32, opts_ptr: u32, opts_len: u32) -> u64 {
     let input = std::slice::from_raw_parts(ptr as *const u8, len as usize);
     let text = match std::str::from_utf8(input) {
         Ok(text) => text,
@@ -263,8 +301,41 @@ pub unsafe extern "C" fn create(ptr: u32, len: u32, opts_ptr: u32, opts_len: u32
         }
     };
 
-    match create_svg(text, &opts) {
+    match encode_svg(text, &opts) {
         Ok(svg) => abi::pack(svg.into_bytes()),
+        Err(_) => 0,
+    }
+}
+
+/// Decode QR payloads from the luma pixel frame at `ptr..ptr+len` (as produced
+/// by the `image` module) and return them as a string-array frame packed as
+/// `ptr << 32 | len`; every code found contributes one entry. A malformed
+/// frame or an image without any readable QR code returns 0. The options
+/// blob carries no keys today; it is walked only for framing validation so a
+/// future option can be added without breaking callers. The caller reads the
+/// output and deallocs both buffers.
+///
+/// The name pairs with `encode` like base64 does. It deliberately is NOT
+/// named `read`: a `#[no_mangle] extern "C"` symbol named `read` interposes
+/// libSystem's own `read(2)` on Darwin, which segfaults any host process at
+/// its first stdout write. Avoid libc-reserved names for exports everywhere.
+///
+/// # Safety
+/// All pointers must reference this module's linear memory with exact lengths.
+#[no_mangle]
+pub unsafe extern "C" fn decode(ptr: u32, len: u32, opts_ptr: u32, opts_len: u32) -> u64 {
+    let input = std::slice::from_raw_parts(ptr as *const u8, len as usize);
+
+    if opts_len != 0 {
+        let blob = std::slice::from_raw_parts(opts_ptr as *const u8, opts_len as usize);
+
+        if option_pairs(blob).is_none() {
+            return 0;
+        }
+    }
+
+    match read_frame(input) {
+        Ok(payloads) => abi::pack(abi::frame_strings(&payloads)),
         Err(_) => 0,
     }
 }
@@ -306,8 +377,8 @@ mod tests {
     }
 
     #[test]
-    fn creates_svg_with_defaults() {
-        let svg = create_svg("sfw.tools", &Options::default()).expect("default create works");
+    fn encodes_svg_with_defaults() {
+        let svg = encode_svg("sfw.tools", &Options::default()).expect("default encode works");
 
         assert!(svg.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\"?>"));
         assert!(svg.contains("<svg xmlns=\"http://www.w3.org/2000/svg\""));
@@ -320,8 +391,8 @@ mod tests {
     #[test]
     fn scale_and_margin_size_the_canvas() {
         // A version-1 code is 21 modules wide; M-level "sfw.tools" fits v1.
-        let small = create_svg("sfw.tools", &Options { scale: 1, margin: 0, ..Options::default() }).unwrap();
-        let big = create_svg("sfw.tools", &Options { scale: 8, margin: 2, ..Options::default() }).unwrap();
+        let small = encode_svg("sfw.tools", &Options { scale: 1, margin: 0, ..Options::default() }).unwrap();
+        let big = encode_svg("sfw.tools", &Options { scale: 8, margin: 2, ..Options::default() }).unwrap();
         let small_view = small.split("viewBox=\"").nth(1).unwrap().split('"').next().unwrap();
         let big_view = big.split("viewBox=\"").nth(1).unwrap().split('"').next().unwrap();
 
@@ -331,19 +402,19 @@ mod tests {
 
     #[test]
     fn rejects_empty_input_and_bad_bounds() {
-        assert!(create_svg("", &Options::default()).is_err());
+        assert!(encode_svg("", &Options::default()).is_err());
 
         let zero = Options {
             scale: 0,
             ..Options::default()
         };
-        assert!(create_svg("x", &zero).is_err());
+        assert!(encode_svg("x", &zero).is_err());
 
         let wide = Options {
             margin: 33,
             ..Options::default()
         };
-        assert!(create_svg("x", &wide).is_err());
+        assert!(encode_svg("x", &wide).is_err());
     }
 
     #[test]
@@ -351,7 +422,7 @@ mod tests {
         // Version-40 caps byte capacity well below 64 KiB at every ECC level.
         let huge = "x".repeat(70_000);
 
-        assert!(create_svg(&huge, &Options::default()).is_err());
+        assert!(encode_svg(&huge, &Options::default()).is_err());
     }
 
     #[test]
@@ -395,5 +466,86 @@ mod tests {
                 ..Options::default()
             })
         );
+    }
+    /// Render `text` as a luma pixel buffer exactly like a clean screenshot
+    /// of one of our own SVGs: white background, black modules, quiet zone.
+    /// Returns `(width, height, samples)` ready for `frame_pixels`.
+    fn render_gray(text: &str, scale: usize, margin: usize) -> (usize, usize, Vec<u8>) {
+        let code = qrcode::QrCode::new(text.as_bytes()).unwrap();
+        let width = code.width();
+        let colors = code.to_colors();
+        let size = (width + margin * 2) * scale;
+        let mut pixels = vec![255u8; size * size];
+
+        for row in 0..width {
+            for col in 0..width {
+                if !matches!(colors[row * width + col], qrcode::Color::Dark) {
+                    continue;
+                }
+
+                for dy in 0..scale {
+                    let y = (margin + row) * scale + dy;
+
+                    for dx in 0..scale {
+                        pixels[y * size + (margin + col) * scale + dx] = 0;
+                    }
+                }
+            }
+        }
+
+        (size, size, pixels)
+    }
+
+    #[test]
+    fn round_trips_a_luma_frame() {
+        let (width, height, pixels) = render_gray("https://sfw.tools/qr", 8, 4);
+        let frame = abi::frame_pixels(width as u32, height as u32, 1, &pixels).unwrap();
+        let payloads = read_frame(&frame).unwrap();
+
+        assert_eq!(payloads, vec!["https://sfw.tools/qr".to_string()]);
+    }
+
+    #[test]
+    fn reads_multiple_codes_from_one_frame() {
+        let (lw, lh, lp) = render_gray("left code", 4, 4);
+        let (rw, rh, rp) = render_gray("right code", 4, 4);
+        let gap = 16;
+        let height = lh.max(rh);
+        let width = lw + gap + rw;
+        let mut combined = vec![255u8; width * height];
+
+        for row in 0..lh {
+            combined[row * width..row * width + lw].copy_from_slice(&lp[row * lw..(row + 1) * lw]);
+        }
+
+        let offset = lw + gap;
+
+        for row in 0..rh {
+            combined[row * width + offset..row * width + offset + rw]
+                .copy_from_slice(&rp[row * rw..(row + 1) * rw]);
+        }
+
+        let frame = abi::frame_pixels(width as u32, height as u32, 1, &combined).unwrap();
+        let mut payloads = read_frame(&frame).unwrap();
+
+        payloads.sort();
+
+        assert_eq!(payloads, vec!["left code".to_string(), "right code".to_string()]);
+    }
+
+    #[test]
+    fn rejects_garbage_qrless_and_non_luma_frames() {
+        assert!(read_frame(b"not a pixel frame at all").is_err());
+
+        // A valid frame of plain white carries no codes.
+        let blank = abi::frame_pixels(64, 64, 1, &vec![255u8; 64 * 64]).unwrap();
+
+        assert!(read_frame(&blank).is_err());
+
+        // RGBA frames are refused: this reader only takes grayscale.
+        let rgba = abi::frame_pixels(4, 4, 4, &vec![255u8; 4 * 4 * 4]).unwrap();
+
+        assert!(read_frame(&rgba).is_err());
+        assert!(read_frame(&[]).is_err());
     }
 }

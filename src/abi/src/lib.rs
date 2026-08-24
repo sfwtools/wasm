@@ -162,3 +162,54 @@ pub fn frame_strings(strings: &[String]) -> Vec<u8> {
 
     blob
 }
+
+/// Serialize raw pixels into the pixel wire frame: little-endian width and
+/// height, a channel count (1 = luma, 4 = RGBA), then row-major samples with
+/// the origin at the top-left. `image.decode` produces this shape and any
+/// consumer of raw pixels (`qr.read`) parses it back; keeping both directions
+/// here means the convention lives in exactly one place. Truncating the
+/// length is rejected rather than yielding a short image.
+pub fn frame_pixels(width: u32, height: u32, channels: u8, pixels: &[u8]) -> Option<Vec<u8>> {
+    let expected = sample_count(width, height, channels)?;
+
+    if pixels.len() != expected {
+        return None;
+    }
+
+    let mut blob = Vec::with_capacity(9 + pixels.len());
+    blob.extend_from_slice(&width.to_le_bytes());
+    blob.extend_from_slice(&height.to_le_bytes());
+    blob.push(channels);
+    blob.extend_from_slice(pixels);
+
+    Some(blob)
+}
+
+/// Sample count of a pixel frame as `width * height * channels`, or `None`
+/// when the multiplication would overflow: callers must treat that like any
+/// other malformed frame instead of panicking on hostile headers.
+fn sample_count(width: u32, height: u32, channels: u8) -> Option<usize> {
+    (width as usize)
+        .checked_mul(height as usize)?
+        .checked_mul(channels as usize)
+}
+
+/// Parse the pixel wire frame produced by `frame_pixels` into its parts.
+/// Returns `None` on any framing error: truncated header or a sample buffer
+/// that does not match `width * height * channels`.
+pub fn parse_pixels(frame: &[u8]) -> Option<(u32, u32, u8, &[u8])> {
+    if frame.len() < 9 {
+        return None;
+    }
+
+    let width = u32::from_le_bytes(frame[0..4].try_into().ok()?);
+    let height = u32::from_le_bytes(frame[4..8].try_into().ok()?);
+    let channels = frame[8];
+    let pixels = &frame[9..];
+
+    if sample_count(width, height, channels)? != pixels.len() || pixels.is_empty() {
+        return None;
+    }
+
+    Some((width, height, channels, pixels))
+}

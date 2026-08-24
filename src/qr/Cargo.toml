@@ -4,7 +4,7 @@ description = "Create QR codes as SVG from UTF-8 text."
 edition = "2021"
 license = "AGPL-3.0"
 name = "qr"
-version = "0.1.1"
+version = "0.1.2"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -16,6 +16,11 @@ abi = { path = "../abi" }
 # Pure-Rust QR matrix encoder. Rendering features (image/svg of the crate)
 # stay off: this core renders its own minimal SVG from the module matrix.
 qrcode = { version = "0.14", default-features = false }
+# QR detection + ECC decode behind `decode`. Default features stay off: the
+# optional `image` glue is not needed because this core feeds its own raw
+# luma buffer to `prepare_from_greyscale`. File-format decoding lives in the
+# separate `image` module, which hands over a pixel frame.
+rqrr = { version = "0.10", default-features = false }
 
 [profile.release]
 codegen-units = 1
