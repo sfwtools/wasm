@@ -75,6 +75,8 @@ name = "image"
 version = "0.1.0"
 dependencies = [
  "abi",
+ "crc32fast",
+ "fdeflate",
  "image 0.25.5",
 ]
 

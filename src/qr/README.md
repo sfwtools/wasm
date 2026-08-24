@@ -1,6 +1,7 @@
 # qr
 
-Encode UTF-8 text as QR code SVG, read QR codes back from images.
+Encode UTF-8 text as a QR code SVG or RGBA pixel frame, read QR codes back
+from images.
 
 ## Module
 
@@ -13,7 +14,12 @@ crate.
 Encoding uses the pure-Rust `qrcode` crate with its rendering features off;
 this core renders its own minimal SVG (white background, black modules,
 integer coordinates, `shape-rendering="crispEdges"`) so the output is one
-predictable shape. Dark modules in a row merge into single rects.
+predictable shape. Dark modules in a row merge into single rects. With the
+`output=rgba` option it instead returns an RGBA pixel frame (white
+background, black modules, each module `scale` pixels, wrapped in the quiet
+zone) that the `image` module encodes straight to compressed PNG - so PNG
+output is a two-call chain (`qr.encode` then `image.encode`) rather than a
+feature inside qr.
 
 Decoding uses `rqrr` (finder-pattern detection, perspective handling, ECC)
 over a raw luma pixel frame. File-format decoding lives in the separate
@@ -40,16 +46,18 @@ output, `dealloc` every buffer. The packed `u64` result is
 `ptr << 32 | len`; a result of `0` means the input or options were invalid.
 
 ```
-encode(inputPtr, inputLen, optsPtr, optsLen) -> u64   // SVG document
+encode(inputPtr, inputLen, optsPtr, optsLen) -> u64   // SVG document or RGBA pixel frame
 decode(inputPtr, inputLen, optsPtr, optsLen) -> u64   // string-array frame
 ```
 
 Pass `optsPtr = 0, optsLen = 0` for defaults. `encode` takes UTF-8 text and
-returns a standalone SVG document. `decode` takes the pixel frame produced by
-`image.decode` (`width:u32 height:u32 channels:u8 samples`, little-endian,
-row-major, luma only) and returns the string-array frame (magic byte, count,
-length-prefixed UTF-8 entries), one entry per QR code found in the frame.
-A malformed frame or one without any readable code rejects the call.
+returns a standalone SVG document, or - with `output=rgba` - an RGBA pixel
+frame (the wire format `image.encode` takes). `decode` takes the pixel frame
+produced by `image.decode` (`width:u32 height:u32 channels:u8 samples`,
+little-endian, row-major, luma only) and returns the string-array frame
+(magic byte, count, length-prefixed UTF-8 entries), one entry per QR code
+found in the frame. A malformed frame or one without any readable code
+rejects the call.
 
 ## Options blob
 
@@ -72,6 +80,7 @@ without breaking callers. `decode` takes no options today.
 | `ecc`    | `L`,`M`,`Q`,`H`   | `M`     | Error correction level (~7/15/25/30% recoverable)  |
 | `scale`  | column number     | `4`     | Output pixels per module (1-64)                    |
 | `margin` | column number     | `4`     | Quiet zone around the code, in modules (0-32)      |
+| `output` | `svg`,`rgba`      | `svg`   | Render format: SVG document, or RGBA pixel frame   |
 
 ## Output
 
@@ -83,6 +92,16 @@ safe to save as `.svg` and open anywhere:
   <rect width="100%" height="100%" fill="#ffffff"/>
   <rect x="..." y="..." width="..." height="..."/>
 </svg>
+```
+
+With `output=rgba` it produces the pixel wire frame (little-endian `width:u32
+height:u32 channels:u8`, then row-major samples, 4 channels RGBA), which the
+`image` module's `encode` export turns into a compressed PNG. Example chain
+for a PNG:
+
+```
+qr.encode(text, { output:'rgba' }) -> frame
+image.encode(frame)                -> PNG bytes
 ```
 
 `decode` produces a string-array frame of payloads in reading order, e.g.

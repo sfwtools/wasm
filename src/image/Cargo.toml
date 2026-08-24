@@ -16,9 +16,17 @@ doctest = false
 # Shared raw-ABI transport layer (packing, pixel frame); compiles into this
 # module's artifact like any other dependency.
 abi = { path = "../abi" }
+# CRC-32 for PNG chunk checksums; already in the tree via the png crate.
+crc32fast = "1.5"
+# Fast deflate, used for both PNG encode (Compressor) and decode (via the png
+# crate's Decompressor). Hand-rolling the PNG container around fdeflate keeps
+# flate2/miniz_oxide out of the artifact: png 0.17 declares flate2 as a
+# non-optional dep, so any use of png::Encoder would link it.
+fdeflate = "0.3"
 # Input decoding: PNG (screenshots) + JPEG (phone photos), all other formats
-# off so the artifact stays as small as the set allows. Encoding is not
-# enabled; this module only turns files into pixels.
+# off so the artifact stays as small as the set allows. Encoding does NOT go
+# through this crate's writer: encode_png builds the PNG container directly
+# with fdeflate + crc32fast, so the png encoder and flate2 stay dead-stripped.
 #
 # Pinned to exactly 0.25.5: newer 0.25.x pulls moxcms/pxfm (ICC color
 # management) unconditionally, costing ~68 KB for transforms we never ask

@@ -14,13 +14,15 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <http://www.gnu.org/licenses/>.
 
-//! image - decode PNG and JPEG images into raw pixel frames.
+//! image - decode PNG and JPEG images into raw pixel frames, and encode raw
+//! pixel frames back into compressed PNG.
 //!
 //! Decoding rides on the `image` crate with only the PNG and JPEG codecs
 //! enabled; everything else stays out so the artifact remains small. The
 //! output is the shared pixel wire frame (see README.md): little-endian
 //! width and height, a channel count, then row-major samples - no headers,
-//! no compression - ready for consumers such as `qr.read`.
+//! no compression - ready for consumers such as `qr.read`. `encode` is the
+//! reverse: a pixel frame (luma or RGBA) in, a compressed PNG out.
 //!
 //! Options travel as the house options blob (see README.md): `0x01` magic,
 //! little-endian length-prefixed UTF-8 key/value pairs; unknown keys ignored,
@@ -29,7 +31,7 @@
 //! Buffer packing and pixel-frame framing come from the shared `abi` crate;
 //! only the tool logic lives here.
 
-use abi::{frame_pixels, option_pairs};
+use abi::{frame_pixels, option_pairs, parse_pixels};
 
 /// The module's self-description as UTF-8 JSON; `JSON.parse` it on the host
 /// side.
@@ -46,6 +48,9 @@ const MANIFEST: &str = r#"{
           "description": "Sample layout of the returned pixels: 1 byte per pixel grayscale, or 4 bytes per pixel RGBA."
         }
       }
+    },
+    "encode": {
+      "summary": "Encode a raw pixel frame (luma or RGBA) as a compressed PNG image."
     }
   }
 }"#;
@@ -83,6 +88,112 @@ pub fn decode_pixels(bytes: &[u8], color: &Color) -> Result<(u32, u32, u8, Vec<u
     };
 
     Ok((width, height, channels, pixels))
+}
+
+/// Encode a raw pixel frame (see README.md) into a compressed PNG. The frame
+/// may be luma (1 channel) or RGBA (4 channels); anything else is rejected.
+/// Errors name the cause for hosts that surface them (the ABI itself just
+/// returns 0).
+///
+/// The PNG container is hand-rolled around `fdeflate` (deflate) and
+/// `crc32fast` (chunk checksums) instead of going through the `png` crate's
+/// encoder: png 0.17 declares flate2 as a non-optional dependency, so calling
+/// `png::Encoder` would link flate2/miniz_oxide into the artifact even though
+/// only its `Compression::Fast` (fdeflate) path would run. Building the few
+/// chunks here keeps encode on the same deflate codec the decoder already
+/// ships and lets wasm-opt strip flate2 entirely.
+pub fn encode_png(frame: &[u8]) -> Result<Vec<u8>, &'static str> {
+    let (width, height, channels, pixels) =
+        parse_pixels(frame).ok_or("the input is not a valid pixel frame")?;
+
+    let color_type = match channels {
+        1 => 0u8,
+        4 => 6u8,
+        _ => return Err("the pixel frame must be luma (1 channel) or RGBA (4 channels)"),
+    };
+
+    // Scanlines: each row prefixed with a filter byte, then the filtered row.
+    // Filtering turns flat regions - a QR code's white background and black
+    // modules - into runs of zeros before deflate, keeping the output small.
+    // Sub (delta vs the previous pixel) handles horizontal flatness; Up
+    // (delta vs the pixel above) handles vertical repetition, which matters
+    // when `qr.encode` scales modules into repeated rows. Per row we pick
+    // whichever filter produces more zero bytes - a cheap heuristic that
+    // beats fixing one filter without the full adaptive cost.
+    // ponytail: only Sub/Up are tried, with zero-count as the proxy for
+    // compressed size, vs full PNG adaptive (None/Sub/Up/Average/Paeth + sum
+    // of abs diffs). Measured ~1.5x larger than the png crate's full adaptive
+    // on QR frames; upgrade only if output size on real photos matters.
+    let row_len = width as usize * channels as usize;
+    let mut raw = Vec::with_capacity((row_len + 1) * height as usize);
+    let mut prev_row = vec![0u8; row_len];
+
+    for row in 0..height as usize {
+        let line = &pixels[row * row_len..(row + 1) * row_len];
+        let mut sub = Vec::with_capacity(row_len);
+        let mut up = Vec::with_capacity(row_len);
+
+        for index in 0..row_len {
+            let left = if index >= channels as usize { line[index - channels as usize] } else { 0 };
+            let above = prev_row[index];
+
+            sub.push(line[index].wrapping_sub(left));
+            up.push(line[index].wrapping_sub(above));
+        }
+
+        let sub_zeros = sub.iter().filter(|&&b| b == 0).count();
+        let up_zeros = up.iter().filter(|&&b| b == 0).count();
+
+        if up_zeros > sub_zeros {
+            raw.push(2);
+            raw.extend_from_slice(&up);
+        } else {
+            raw.push(1);
+            raw.extend_from_slice(&sub);
+        }
+
+        prev_row.copy_from_slice(line);
+    }
+
+    // zlib-wrapped deflate, exactly what a PNG IDAT chunk carries.
+    let mut compressor = fdeflate::Compressor::new(std::io::Cursor::new(Vec::new()))
+        .map_err(|_| "PNG encoding failed")?;
+
+    compressor
+        .write_data(&raw)
+        .map_err(|_| "PNG encoding failed")?;
+    let idat = compressor
+        .finish()
+        .map_err(|_| "PNG encoding failed")?
+        .into_inner();
+
+    // PNG signature + IHDR + IDAT + IEND. Each chunk is
+    // length:u32BE + type + data + CRC32 over type+data.
+    let mut png = Vec::with_capacity(8 + 12 + 25 + 12 + idat.len());
+    png.extend_from_slice(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
+
+    let mut ihdr = Vec::with_capacity(13);
+    ihdr.extend_from_slice(&width.to_be_bytes());
+    ihdr.extend_from_slice(&height.to_be_bytes());
+    ihdr.extend_from_slice(&[8, color_type, 0, 0, 0]);
+    push_chunk(&mut png, b"IHDR", &ihdr);
+    push_chunk(&mut png, b"IDAT", &idat);
+    push_chunk(&mut png, b"IEND", &[]);
+
+    Ok(png)
+}
+
+/// Append one PNG chunk (`type` + `data`) with its length and CRC to `png`.
+fn push_chunk(png: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
+    png.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    png.extend_from_slice(kind);
+    png.extend_from_slice(data);
+
+    let mut crc = crc32fast::Hasher::new();
+
+    crc.update(kind);
+    crc.update(data);
+    png.extend_from_slice(&crc.finalize().to_be_bytes());
 }
 
 /// Parse the options blob straight into a resolved `Color`. Framing (magic
@@ -152,6 +263,34 @@ pub unsafe extern "C" fn decode(ptr: u32, len: u32, opts_ptr: u32, opts_len: u32
             Some(frame) => abi::pack(frame),
             None => 0,
         },
+        Err(_) => 0,
+    }
+}
+
+/// Encode the raw pixel frame at `ptr..ptr+len` as a compressed PNG packed as
+/// `ptr << 32 | len`: little-endian width and height, one channel-count byte
+/// (1 = luma, 4 = RGBA), then row-major samples. Options come from the blob
+/// at `opts_ptr..opts_ptr+opts_len` (pass 0/0 for defaults; the export takes
+/// no options today, so the blob is walked only for framing validation); a
+/// malformed frame, a bad blob, or an unsupported channel count returns 0.
+/// The caller reads the output and deallocs both buffers.
+///
+/// # Safety
+/// All pointers must reference this module's linear memory with exact lengths.
+#[no_mangle]
+pub unsafe extern "C" fn encode(ptr: u32, len: u32, opts_ptr: u32, opts_len: u32) -> u64 {
+    let input = std::slice::from_raw_parts(ptr as *const u8, len as usize);
+
+    if opts_len != 0 {
+        let blob = std::slice::from_raw_parts(opts_ptr as *const u8, opts_len as usize);
+
+        if option_pairs(blob).is_none() {
+            return 0;
+        }
+    }
+
+    match encode_png(input) {
+        Ok(png) => abi::pack(png),
         Err(_) => 0,
     }
 }
@@ -275,6 +414,34 @@ mod tests {
     fn rejects_garbage_and_empty_input() {
         assert!(decode_pixels(b"not an image at all", &Color::Luma).is_err());
         assert!(decode_pixels(&[], &Color::Luma).is_err());
+    }
+
+    #[test]
+    fn encode_png_round_trips_luma_and_rgba() {
+        for color in [Color::Luma, Color::Rgba] {
+            let (width, height, channels, pixels) = decode_pixels(&png_bytes(), &color).unwrap();
+            let frame = frame_pixels(width, height, channels, &pixels).unwrap();
+            let png = encode_png(&frame).unwrap();
+
+            // PNG magic; the output must decode back to the same pixels.
+            assert_eq!(&png[0..8], &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A], "png signature");
+
+            let (w2, h2, ch2, pixels2) = decode_pixels(&png, &color).unwrap();
+
+            assert_eq!((w2, h2, ch2), (width, height, channels));
+            assert_eq!(pixels2, pixels);
+        }
+    }
+
+    #[test]
+    fn encode_png_rejects_bad_frames() {
+        assert!(encode_png(b"not a frame at all").is_err());
+        assert!(encode_png(&[]).is_err());
+
+        // 3 channels is not a supported sample layout.
+        let bad = frame_pixels(2, 2, 3, &[0; 12]).unwrap();
+
+        assert!(encode_png(&bad).is_err());
     }
 
     #[test]

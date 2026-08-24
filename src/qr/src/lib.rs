@@ -38,7 +38,7 @@ use abi::{option_pairs, parse_pixels, parse_usize};
 const MANIFEST: &str = r#"{
   "exports": {
     "encode": {
-      "summary": "Encode UTF-8 text as a QR code SVG.",
+      "summary": "Encode UTF-8 text as a QR code SVG or RGBA pixel frame.",
       "options": {
         "ecc": {
           "type": "enum",
@@ -55,6 +55,12 @@ const MANIFEST: &str = r#"{
           "type": "number",
           "default": 4,
           "description": "Quiet-zone margin around the code, in modules (0-32)."
+        },
+        "output": {
+          "type": "enum",
+          "values": ["svg", "rgba"],
+          "default": "svg",
+          "description": "Render format: SVG document, or RGBA pixel frame (white background, black modules) that the image module can encode as PNG."
         }
       }
     },
@@ -81,6 +87,8 @@ pub struct Options {
     pub scale: usize,
     /// Quiet zone in modules.
     pub margin: usize,
+    /// Render format.
+    pub output: Output,
 }
 
 impl Default for Options {
@@ -89,6 +97,26 @@ impl Default for Options {
             ecc: Ecc::M,
             scale: 4,
             margin: 4,
+            output: Output::Svg,
+        }
+    }
+}
+
+/// Render format for `encode`.
+#[derive(Debug, PartialEq)]
+pub enum Output {
+    /// Standalone SVG document.
+    Svg,
+    /// RGBA pixel frame (white background, black modules).
+    Rgba,
+}
+
+impl Output {
+    fn parse(value: &[u8]) -> Option<Self> {
+        match value {
+            b"svg" => Some(Output::Svg),
+            b"rgba" => Some(Output::Rgba),
+            _ => None,
         }
     }
 }
@@ -172,9 +200,10 @@ fn render_svg(code: &qrcode::QrCode, opts: &Options) -> String {
     svg
 }
 
-/// Encode the SVG payload for `text` under `opts`. Errors name the cause for
-/// hosts that surface them (the ABI itself just returns 0).
-pub fn encode_svg(text: &str, opts: &Options) -> Result<String, &'static str> {
+/// Validate the shared encode inputs and produce the matrix. Both encoders
+/// (SVG and RGBA) accept the same text and bounds, so the boundary checks
+/// live here once instead of twice.
+fn encode_matrix_or_err(text: &str, opts: &Options) -> Result<qrcode::QrCode, &'static str> {
     if text.is_empty() {
         return Err("input text is empty");
     }
@@ -187,9 +216,60 @@ pub fn encode_svg(text: &str, opts: &Options) -> Result<String, &'static str> {
         return Err("margin must be between 0 and 32");
     }
 
-    let code = encode_matrix(text, &opts.ecc).map_err(|_| "the text does not fit a QR code at this error correction level")?;
+    encode_matrix(text, &opts.ecc).map_err(|_| "the text does not fit a QR code at this error correction level")
+}
+
+/// Encode the SVG payload for `text` under `opts`. Errors name the cause for
+/// hosts that surface them (the ABI itself just returns 0).
+pub fn encode_svg(text: &str, opts: &Options) -> Result<String, &'static str> {
+    let code = encode_matrix_or_err(text, opts)?;
 
     Ok(render_svg(&code, opts))
+}
+
+/// Render the QR matrix as an RGBA pixel frame: white background, black
+/// modules, each module `scale` pixels, wrapped in a `margin`-module quiet
+/// zone. The frame matches the wire format `abi::frame_pixels` produces, so
+/// the `image` module can encode it straight to PNG.
+fn render_rgba(code: &qrcode::QrCode, opts: &Options) -> Vec<u8> {
+    let width = code.width() as usize;
+    let colors = code.to_colors();
+    let size = (width + opts.margin * 2) * opts.scale;
+    let mut pixels = vec![255u8; size * size * 4];
+
+    for row in 0..width {
+        for column in 0..width {
+            if !matches!(colors[row * width + column], qrcode::Color::Dark) {
+                continue;
+            }
+
+            let x0 = (opts.margin + column) * opts.scale;
+            let y0 = (opts.margin + row) * opts.scale;
+
+            for dy in 0..opts.scale {
+                for dx in 0..opts.scale {
+                    let offset = ((y0 + dy) * size + (x0 + dx)) * 4;
+
+                    pixels[offset] = 0;
+                    pixels[offset + 1] = 0;
+                    pixels[offset + 2] = 0;
+                    pixels[offset + 3] = 255;
+                }
+            }
+        }
+    }
+
+    pixels
+}
+
+/// Encode the RGBA pixel frame for `text` under `opts`. Errors name the cause
+/// for hosts that surface them (the ABI itself just returns 0).
+pub fn encode_rgba(text: &str, opts: &Options) -> Result<Vec<u8>, &'static str> {
+    let code = encode_matrix_or_err(text, opts)?;
+    let pixels = render_rgba(&code, opts);
+    let size = (code.width() as usize + opts.margin * 2) * opts.scale;
+
+    abi::frame_pixels(size as u32, size as u32, 4, &pixels).ok_or("pixel frame size overflow")
 }
 
 /// Decode every QR payload found in a raw luma pixel frame (see README.md).
@@ -246,6 +326,10 @@ fn resolve_options(blob: &[u8]) -> Option<Options> {
                 Some(n) => opts.margin = n,
                 None => return None,
             },
+            b"output" => match Output::parse(value) {
+                Some(output) => opts.output = output,
+                None => return None,
+            },
             _ => {}
         }
     }
@@ -273,8 +357,10 @@ pub unsafe extern "C" fn dealloc(ptr: u32, len: u32) {
     abi::free_buf(ptr, len)
 }
 
-/// Encode the UTF-8 text at `ptr..ptr+len` as a QR code SVG returned packed
-/// as `ptr << 32 | len`. Options come from the blob at
+/// Encode the UTF-8 text at `ptr..ptr+len` as a QR code packed as
+/// `ptr << 32 | len`. The `output` option selects the format: SVG by default,
+/// or an RGBA pixel frame (`output=rgba`) that the `image` module can encode
+/// as PNG. Options come from the blob at
 /// `opts_ptr..opts_ptr+opts_len` (pass 0/0 for defaults); empty input, a
 /// malformed blob, an unusable option value, or text that does not fit the
 /// chosen error correction level returns 0. The caller reads the output and
@@ -301,9 +387,15 @@ pub unsafe extern "C" fn encode(ptr: u32, len: u32, opts_ptr: u32, opts_len: u32
         }
     };
 
-    match encode_svg(text, &opts) {
-        Ok(svg) => abi::pack(svg.into_bytes()),
-        Err(_) => 0,
+    match opts.output {
+        Output::Svg => match encode_svg(text, &opts) {
+            Ok(svg) => abi::pack(svg.into_bytes()),
+            Err(_) => 0,
+        },
+        Output::Rgba => match encode_rgba(text, &opts) {
+            Ok(frame) => abi::pack(frame),
+            Err(_) => 0,
+        },
     }
 }
 
@@ -433,8 +525,25 @@ mod tests {
                 ecc: Ecc::H,
                 scale: 12,
                 margin: 0,
+                ..Options::default()
             })
         );
+    }
+
+    #[test]
+    fn resolves_output_option() {
+        assert_eq!(
+            resolve_options(&blob(&[pair("output", "rgba")])),
+            Some(Options {
+                output: Output::Rgba,
+                ..Options::default()
+            })
+        );
+        assert_eq!(
+            resolve_options(&blob(&[pair("output", "svg")])),
+            Some(Options::default())
+        );
+        assert_eq!(resolve_options(&blob(&[pair("output", "pdf")])), None);
     }
 
     #[test]
@@ -503,6 +612,36 @@ mod tests {
         let payloads = read_frame(&frame).unwrap();
 
         assert_eq!(payloads, vec!["https://sfw.tools/qr".to_string()]);
+    }
+
+    #[test]
+    fn rgba_frame_has_expected_geometry_and_colors() {
+        // "sfw.tools" is version 1: 21 modules, margin 4 -> 29 modules wide,
+        // scale 4 -> 116 px. The frame must be RGBA with white background and
+        // black modules.
+        let frame = encode_rgba("sfw.tools", &Options::default()).unwrap();
+        let (width, height, channels, pixels) = parse_pixels(&frame).unwrap();
+
+        assert_eq!((width, height, channels), (116, 116, 4));
+        assert_eq!(pixels.len(), 116 * 116 * 4);
+        assert_eq!(&pixels[0..4], &[255, 255, 255, 255], "top-left corner is white");
+
+        // The finder pattern's top-left dark module sits at pixel (16,16):
+        // margin 4 modules * scale 4.
+        let finder_origin = (16 * 116 + 16) * 4;
+
+        assert_eq!(&pixels[finder_origin..finder_origin + 4], &[0, 0, 0, 255], "finder origin is black");
+    }
+
+    #[test]
+    fn rgba_frame_rejects_bad_options_like_svg() {
+        let zero = Options {
+            scale: 0,
+            ..Options::default()
+        };
+
+        assert!(encode_rgba("x", &zero).is_err());
+        assert!(encode_rgba("", &Options::default()).is_err());
     }
 
     #[test]

@@ -79,8 +79,11 @@ const main = async () => {
     'image manifest does not mark decode as pixels output');
   expect(imageManifest.exports.decode.options.color.values.join(',') === 'luma,rgba',
     'image manifest color values mismatch');
+  expect(imageManifest.exports.encode, 'image manifest lacks the encode export');
   expect(qrManifest.exports.encode && qrManifest.exports.encode.options.ecc.default === 'M',
     'manifest does not describe the encode export');
+  expect(qrManifest.exports.encode.options.output.values.join(',') === 'svg,rgba',
+    'qr encode output option values mismatch');
   expect(qrManifest.exports.decode && qrManifest.exports.decode.output === 'string-array',
     'manifest does not mark decode as string-array output');
 
@@ -125,9 +128,36 @@ const main = async () => {
 
   expect(withUnknown === svg, 'unknown option changed the output');
 
+  // The PNG route: qr.encode as an RGBA frame -> image.encode -> compressed
+  // PNG -> image.decode -> qr.decode reads the payload back. This is the
+  // two-call chain hosts use to produce a downloadable PNG.
+  const rgbaFrame = runExport(qrExports, 'encode', input, { output:'rgba' });
+
+  expect(rgbaFrame !== null, 'qr.encode rgba was rejected');
+  expect(parsePixels(rgbaFrame).channels === 4, 'rgba frame is not 4 channels');
+
+  const png = runExport(imageExports, 'encode', rgbaFrame, undefined);
+
+  expect(png !== null, 'image.encode rejected the rgba frame');
+  expect(png[0] === 0x89 && png[1] === 0x50 && png[2] === 0x4E && png[3] === 0x47,
+    'image.encode did not produce a PNG');
+
+  const pngFrame = runExport(imageExports, 'decode', png, undefined);
+
+  expect(pngFrame !== null, 'image.decode rejected the produced PNG');
+
+  const pngPayloads = parseFrame(runExport(qrExports, 'decode', pngFrame, undefined));
+
+  expect(pngPayloads.length === 1 && pngPayloads[0] === 'sfw.tools',
+    'png round-trip payload mismatch: ' + JSON.stringify(pngPayloads));
+
+  // Bad rgba output values are rejected.
+  expect(runExport(qrExports, 'encode', input, { output:'pdf' }) === null,
+    'encode accepted an unknown output value');
+
   // The double-call read path: PNG bytes -> image.decode -> pixel frame ->
   // qr.decode -> payloads. The committed fixture is a clean screenshot-style
-  // PNG of "https://sfw.tools/qr".
+  // PNG of "https://sfw.tools".
   const fixture = new Uint8Array(readFileSync(join(__dirname, 'sfw.tools.png')));
   const frame = runExport(imageExports, 'decode', fixture, undefined);
 
@@ -140,14 +170,14 @@ const main = async () => {
 
   const payloads = parseFrame(runExport(qrExports, 'decode', frame, undefined));
 
-  expect(payloads.length === 1 && payloads[0] === 'https://sfw.tools/qr',
+  expect(payloads.length === 1 && payloads[0] === 'https://sfw.tools',
     'fixture decode payload mismatch: ' + JSON.stringify(payloads));
 
   // qr.decode refuses RGBA frames: it only takes grayscale.
-  const rgbaFrame = runExport(imageExports, 'decode', fixture, { color:'rgba' });
+  const rgbaDecoded = runExport(imageExports, 'decode', fixture, { color:'rgba' });
 
-  expect(rgbaFrame !== null, 'rgba decode failed');
-  expect(runExport(qrExports, 'decode', rgbaFrame, undefined) === null,
+  expect(rgbaDecoded !== null, 'rgba decode failed');
+  expect(runExport(qrExports, 'decode', rgbaDecoded, undefined) === null,
     'decode accepted a rgba frame');
 
   // Garbage is rejected at each stage instead of throwing or inventing data.
