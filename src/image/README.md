@@ -1,7 +1,8 @@
 # image
 
-Decode PNG and JPEG images into raw pixel frames, and encode raw pixel frames
-back into compressed PNG.
+Decode PNG, JPEG, GIF, TIFF, WebP, BMP, PNM, HDR, ICO, and QOI images into
+raw pixel frames, and encode raw pixel frames back into PNG, JPEG, GIF,
+TIFF, WebP, BMP, PNM, or QOI.
 
 ## Module
 
@@ -10,17 +11,24 @@ Built by `npm run build` into `dist/image.wasm`. It exports `memory`,
 module, no envelope. Buffer packing and pixel-frame framing come from the
 repo's shared `abi` crate.
 
-Decoding uses the `image` crate with only its PNG and JPEG codecs enabled -
-screenshots and phone photos. No other formats are supported, to keep the
-artifact small. Encoding turns a raw pixel frame (luma or RGBA) into a
-compressed PNG: the PNG container is built directly on the repo's `fdeflate`
-(deflate) and `crc32fast` (checksums) dependencies, with a per-row Sub/Up
-filter heuristic, instead of going through the `png` crate's encoder - that
-keeps `flate2`/`miniz_oxide` out of the artifact (png 0.17 declares flate2 as
-a non-optional dependency, so any use of `png::Encoder` would link it). The
-QR flow produces a PNG by chaining `qr.encode` (as RGBA frame) then
-`image.encode`. Consumers such as `qr.decode` take the decode output from
-there; hosts chain the calls (`image.decode` then `qr.decode`).
+Decoding uses the `image` crate with the PNG, JPEG, GIF, TIFF, WebP, BMP,
+PNM, HDR, ICO, and QOI codecs enabled - screenshots, phone photos, and the
+common web and office formats. TGA is absent because the crate's format
+guessing has no TGA magic bytes, so `load_from_memory` cannot auto-detect it.
+Other formats (avif/exr/dds) stay out to keep the artifact small.
+
+Encoding takes a raw pixel frame (luma or RGBA) and an output `format`. PNG
+uses a hand-rolled container built directly on the repo's `fdeflate`
+(deflate) and `crc32fast` (checksums) dependencies with a per-row Sub/Up
+filter heuristic - not the `png` crate's encoder, so `flate2`/`miniz_oxide`
+stay out of the artifact (png 0.17 declares flate2 as a non-optional
+dependency, so any use of `png::Encoder` would link it). JPEG, GIF, TIFF,
+WebP, BMP, PNM, and QOI ride on the image crate's own encoders, already
+linked because the same features drive `decode`. JPEG and PNM get RGB input
+(no alpha); the rest accept RGBA. The QR flow produces a PNG by chaining
+`qr.encode` (as RGBA frame) then `image.encode`. Consumers such as
+`qr.decode` take the decode output from there; hosts chain the calls
+(`image.decode` then `qr.decode`).
 
 ## Manifest
 
@@ -38,13 +46,12 @@ a result of `0` means the input or options were invalid.
 
 ```
 decode(inputPtr, inputLen, optsPtr, optsLen) -> u64   // pixel frame
-encode(inputPtr, inputLen, optsPtr, optsLen) -> u64   // PNG bytes
+encode(inputPtr, inputLen, optsPtr, optsLen) -> u64   // image bytes (format option)
 ```
 
 Pass `optsPtr = 0, optsLen = 0` for defaults. Undecodable bytes reject the
-call. `encode` takes the pixel wire frame (below) and returns compressed PNG
-bytes; it accepts no options today, so the blob is only walked for framing
-validation.
+call. `encode` takes the pixel wire frame (below) and returns the encoded
+image bytes for the requested `format` (PNG by default).
 
 ## Options blob
 
@@ -63,8 +70,11 @@ rather than being silently dropped.
 | Key      | Values            | Default | Description                                        |
 | -------- | ----------------- | ------- | -------------------------------------------------- |
 | `color`  | `luma`,`rgba`     | `luma`  | Sample layout of the returned pixels (`decode` only) |
+| `format` | see below         | `png`   | Output format (`encode` only)                      |
 
-`encode` takes no options; the frame's channel byte declares the layout.
+`format` accepts `png`, `jpeg`, `gif`, `tiff`, `webp`, `bmp`, `pnm`, `qoi`.
+JPEG and PNM take RGB input (their encoders/decoders drop or lack alpha);
+the rest accept luma (widened to RGB) or RGBA frames.
 
 ## Output: the pixel frame
 
@@ -83,9 +93,11 @@ PNG.
 
 ## Output
 
-`decode` returns the pixel frame described above. `encode` returns a
-compressed PNG (deflate via `fdeflate`, per-row Sub/Up adaptive filtering),
-suitable for saving as `.png` or serving directly.
+`decode` returns the pixel frame described above. `encode` returns bytes in
+the requested `format`: PNG (deflate via `fdeflate`, per-row Sub/Up adaptive
+filtering), or the image crate's JPEG, GIF, TIFF, WebP, BMP, PNM, or QOI
+encoder output - suitable for saving with the matching extension or serving
+directly.
 
 ## License
 

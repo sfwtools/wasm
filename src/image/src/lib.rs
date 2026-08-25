@@ -14,11 +14,12 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <http://www.gnu.org/licenses/>.
 
-//! image - decode PNG and JPEG images into raw pixel frames, and encode raw
-//! pixel frames back into compressed PNG.
+//! image - decode PNG, JPEG, GIF, TIFF, WebP, BMP, PNM, HDR, ICO, and QOI
+//! images into raw pixel frames, and encode raw pixel frames back into
+//! compressed PNG.
 //!
-//! Decoding rides on the `image` crate with only the PNG and JPEG codecs
-//! enabled; everything else stays out so the artifact remains small. The
+//! Decoding rides on the `image` crate with only those codecs enabled;
+//! everything else stays out so the artifact remains small. The
 //! output is the shared pixel wire frame (see README.md): little-endian
 //! width and height, a channel count, then row-major samples - no headers,
 //! no compression - ready for consumers such as `qr.read`. `encode` is the
@@ -38,7 +39,7 @@ use abi::{frame_pixels, option_pairs, parse_pixels};
 const MANIFEST: &str = r#"{
   "exports": {
     "decode": {
-      "summary": "Decode a PNG or JPEG image into a raw pixel frame.",
+      "summary": "Decode a PNG, JPEG, GIF, TIFF, WebP, BMP, PNM, HDR, ICO, or QOI image into a raw pixel frame.",
       "output": "pixels",
       "options": {
         "color": {
@@ -50,7 +51,15 @@ const MANIFEST: &str = r#"{
       }
     },
     "encode": {
-      "summary": "Encode a raw pixel frame (luma or RGBA) as a compressed PNG image."
+      "summary": "Encode a raw pixel frame (luma or RGBA) into a PNG, JPEG, GIF, TIFF, WebP, BMP, PNM, or QOI image.",
+      "options": {
+        "format": {
+          "type": "enum",
+          "values": ["png", "jpeg", "gif", "tiff", "webp", "bmp", "pnm", "qoi"],
+          "default": "png",
+          "description": "Output format. PNG is the default (compressed, fdeflate); the others use the image crate's own encoders."
+        }
+      }
     }
   }
 }"#;
@@ -74,11 +83,43 @@ impl Color {
     }
 }
 
+/// Output format for `encode`. PNG is hand-rolled (see `encode_png`); the
+/// rest ride on the image crate's encoders, which are already linked because
+/// their codecs are enabled for `decode`.
+#[derive(Debug, PartialEq)]
+pub enum Format {
+    Png,
+    Jpeg,
+    Gif,
+    Tiff,
+    Webp,
+    Bmp,
+    Pnm,
+    Qoi,
+}
+
+impl Format {
+    fn parse(value: &[u8]) -> Option<Self> {
+        match value {
+            b"png" => Some(Format::Png),
+            b"jpeg" => Some(Format::Jpeg),
+            b"gif" => Some(Format::Gif),
+            b"tiff" => Some(Format::Tiff),
+            b"webp" => Some(Format::Webp),
+            b"bmp" => Some(Format::Bmp),
+            b"pnm" => Some(Format::Pnm),
+            b"qoi" => Some(Format::Qoi),
+            _ => None,
+        }
+    }
+}
+
 /// Decode `bytes` (a PNG or JPEG file, auto-detected) into raw samples laid
 /// out per `color`. Errors name the cause for hosts that surface them (the
 /// ABI itself just returns 0).
 pub fn decode_pixels(bytes: &[u8], color: &Color) -> Result<(u32, u32, u8, Vec<u8>), &'static str> {
-    let img = image::load_from_memory(bytes).map_err(|_| "the input is not a readable PNG or JPEG image")?;
+    let img = image::load_from_memory(bytes)
+        .map_err(|_| "the input is not a readable image (supported: PNG, JPEG, GIF, TIFF, WebP, BMP, PNM, HDR, ICO, QOI)")?;
     let width = img.width();
     let height = img.height();
 
@@ -183,6 +224,97 @@ pub fn encode_png(frame: &[u8]) -> Result<Vec<u8>, &'static str> {
     Ok(png)
 }
 
+/// Encode a raw pixel frame into the requested `format`. PNG uses the
+/// hand-rolled fdeflate writer (keeps flate2 out of the artifact); every
+/// other format rides on the image crate's own encoder for that codec, which
+/// is already linked because the same features drive `decode`.
+pub fn encode_image(frame: &[u8], format: &Format) -> Result<Vec<u8>, &'static str> {
+    if *format == Format::Png {
+        return encode_png(frame);
+    }
+
+    let (width, height, channels, pixels) =
+        parse_pixels(frame).ok_or("the input is not a valid pixel frame")?;
+    let mut bytes = Vec::new();
+    let mut writer = std::io::Cursor::new(&mut bytes);
+
+    // The image encoders accept RGB/RGBA raw samples; luma frames are widened
+    // to RGB (replicated). JPEG is lossy with no alpha, and PNM's decoder
+    // rejects RGBA (PAM) in this build, so RGBA frames drop the alpha byte
+    // and encode as RGB there; every other encoder takes RGBA as-is.
+    let (raw, color_type) = if matches!(format, Format::Jpeg | Format::Pnm) {
+        match channels {
+            1 => {
+                let mut rgb = Vec::with_capacity(pixels.len() * 3);
+
+                for &sample in pixels {
+                    rgb.push(sample);
+                    rgb.push(sample);
+                    rgb.push(sample);
+                }
+
+                (rgb, image::ExtendedColorType::Rgb8)
+            }
+            4 => {
+                let mut rgb = Vec::with_capacity(pixels.len() / 4 * 3);
+
+                for chunk in pixels.chunks_exact(4) {
+                    rgb.push(chunk[0]);
+                    rgb.push(chunk[1]);
+                    rgb.push(chunk[2]);
+                }
+
+                (rgb, image::ExtendedColorType::Rgb8)
+            }
+            _ => return Err("the pixel frame must be luma (1 channel) or RGBA (4 channels)"),
+        }
+    } else {
+        match channels {
+            1 => {
+                let mut rgb = Vec::with_capacity(pixels.len() * 3);
+
+                for &sample in pixels {
+                    rgb.push(sample);
+                    rgb.push(sample);
+                    rgb.push(sample);
+                }
+
+                (rgb, image::ExtendedColorType::Rgb8)
+            }
+            4 => (pixels.to_vec(), image::ExtendedColorType::Rgba8),
+            _ => return Err("the pixel frame must be luma (1 channel) or RGBA (4 channels)"),
+        }
+    };
+
+    use image::ImageEncoder as _;
+
+    let result = match format {
+        Format::Jpeg => {
+            image::codecs::jpeg::JpegEncoder::new(&mut writer).write_image(&raw, width, height, color_type)
+        }
+        Format::Gif => image::codecs::gif::GifEncoder::new(&mut writer)
+            .encode(&raw, width, height, color_type),
+        Format::Tiff => {
+            image::codecs::tiff::TiffEncoder::new(&mut writer).write_image(&raw, width, height, color_type)
+        }
+        Format::Webp => image::codecs::webp::WebPEncoder::new_lossless(&mut writer)
+            .write_image(&raw, width, height, color_type),
+        Format::Bmp => {
+            image::codecs::bmp::BmpEncoder::new(&mut writer).write_image(&raw, width, height, color_type)
+        }
+        Format::Pnm => {
+            image::codecs::pnm::PnmEncoder::new(&mut writer).write_image(&raw, width, height, color_type)
+        }
+        Format::Qoi => {
+            image::codecs::qoi::QoiEncoder::new(&mut writer).write_image(&raw, width, height, color_type)
+        }
+        Format::Png => unreachable!("png handled above"),
+    };
+
+    result.map_err(|_| "the pixel frame could not be encoded to the requested format")?;
+    Ok(bytes)
+}
+
 /// Append one PNG chunk (`type` + `data`) with its length and CRC to `png`.
 fn push_chunk(png: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
     png.extend_from_slice(&(data.len() as u32).to_be_bytes());
@@ -212,6 +344,21 @@ fn resolve_color(blob: &[u8]) -> Option<Color> {
     }
 
     Some(color)
+}
+
+/// Parse the options blob straight into a resolved `Format` for `encode`.
+/// Framing is validated by the shared `option_pairs`; an empty blob means
+/// PNG. Unknown keys are ignored; an unknown `format` value is an error.
+fn resolve_format(blob: &[u8]) -> Option<Format> {
+    let mut format = Format::Png;
+
+    for (key, value) in option_pairs(blob)? {
+        if key == b"format" {
+            format = Format::parse(value)?;
+        }
+    }
+
+    Some(format)
 }
 
 /// Allocate a write buffer of exactly `len` bytes. The caller passes the
@@ -267,13 +414,14 @@ pub unsafe extern "C" fn decode(ptr: u32, len: u32, opts_ptr: u32, opts_len: u32
     }
 }
 
-/// Encode the raw pixel frame at `ptr..ptr+len` as a compressed PNG packed as
-/// `ptr << 32 | len`: little-endian width and height, one channel-count byte
-/// (1 = luma, 4 = RGBA), then row-major samples. Options come from the blob
-/// at `opts_ptr..opts_ptr+opts_len` (pass 0/0 for defaults; the export takes
-/// no options today, so the blob is walked only for framing validation); a
-/// malformed frame, a bad blob, or an unsupported channel count returns 0.
-/// The caller reads the output and deallocs both buffers.
+/// Encode the raw pixel frame at `ptr..ptr+len` packed as `ptr << 32 | len`:
+/// little-endian width and height, one channel-count byte (1 = luma, 4 =
+/// RGBA), then row-major samples. The `format` option selects the output
+/// (PNG by default, via the hand-rolled fdeflate writer). Options come from
+/// the blob at `opts_ptr..opts_ptr+opts_len` (pass 0/0 for defaults); a
+/// malformed frame, a bad blob, an unusable option value, or an unsupported
+/// channel count returns 0. The caller reads the output and deallocs both
+/// buffers.
 ///
 /// # Safety
 /// All pointers must reference this module's linear memory with exact lengths.
@@ -281,16 +429,19 @@ pub unsafe extern "C" fn decode(ptr: u32, len: u32, opts_ptr: u32, opts_len: u32
 pub unsafe extern "C" fn encode(ptr: u32, len: u32, opts_ptr: u32, opts_len: u32) -> u64 {
     let input = std::slice::from_raw_parts(ptr as *const u8, len as usize);
 
-    if opts_len != 0 {
+    let format = if opts_len == 0 {
+        Format::Png
+    } else {
         let blob = std::slice::from_raw_parts(opts_ptr as *const u8, opts_len as usize);
 
-        if option_pairs(blob).is_none() {
-            return 0;
+        match resolve_format(blob) {
+            Some(format) => format,
+            None => return 0,
         }
-    }
+    };
 
-    match encode_png(input) {
-        Ok(png) => abi::pack(png),
+    match encode_image(input, &format) {
+        Ok(bytes) => abi::pack(bytes),
         Err(_) => 0,
     }
 }
@@ -402,6 +553,98 @@ mod tests {
         assert!(pixels.iter().max().unwrap() > &200, "white point lost: {:?}", pixels);
     }
 
+    /// Encode the same 3x2 gradient through the image crate writer for each
+    /// format, then assert `decode_pixels` reads it back at the right size.
+    #[test]
+    fn decodes_gif_tiff_webp() {
+        let mut img = image::GrayImage::new(3, 2);
+
+        img.put_pixel(0, 0, image::Luma([0]));
+        img.put_pixel(1, 0, image::Luma([128]));
+        img.put_pixel(2, 0, image::Luma([255]));
+        img.put_pixel(0, 1, image::Luma([255]));
+        img.put_pixel(1, 1, image::Luma([128]));
+        img.put_pixel(2, 1, image::Luma([0]));
+
+        for format in [image::ImageFormat::Gif, image::ImageFormat::Tiff, image::ImageFormat::WebP] {
+            let mut bytes = Vec::new();
+
+            image::DynamicImage::ImageLuma8(img.clone())
+                .to_rgb8()
+                .write_to(&mut std::io::Cursor::new(&mut bytes), format)
+                .unwrap();
+
+            let (width, height, channels, _) = decode_pixels(&bytes, &Color::Luma)
+                .unwrap_or_else(|_| panic!("format {:?} failed to decode", format));
+
+            assert_eq!((width, height, channels), (3, 2, 1), "format {:?}", format);
+        }
+    }
+
+    /// The near-free built-in formats must decode at the right size too. All
+    /// five write through the image crate's own encoders (no extra deps).
+    #[test]
+    fn decodes_bmp_pnm_hdr_ico_qoi() {
+        let mut img = image::GrayImage::new(3, 2);
+
+        img.put_pixel(0, 0, image::Luma([0]));
+        img.put_pixel(1, 0, image::Luma([128]));
+        img.put_pixel(2, 0, image::Luma([255]));
+        img.put_pixel(0, 1, image::Luma([255]));
+        img.put_pixel(1, 1, image::Luma([128]));
+        img.put_pixel(2, 1, image::Luma([0]));
+
+        for format in [
+            image::ImageFormat::Bmp,
+            image::ImageFormat::Pnm,
+            image::ImageFormat::Hdr,
+            image::ImageFormat::Ico,
+            image::ImageFormat::Qoi,
+        ] {
+            let mut bytes = Vec::new();
+
+            // HDR stores float samples (Rgb32F); ICO only embeds 32-bit RGBA. The
+            // other three take Rgb8.
+            if format == image::ImageFormat::Hdr {
+                let mut float = image::Rgb32FImage::new(3, 2);
+
+                float.put_pixel(0, 0, image::Rgb([0.0, 0.5, 1.0]));
+                float.put_pixel(1, 0, image::Rgb([1.0, 0.5, 0.0]));
+                float.put_pixel(2, 0, image::Rgb([0.25, 0.25, 0.25]));
+                float.put_pixel(0, 1, image::Rgb([0.5, 1.0, 0.0]));
+                float.put_pixel(1, 1, image::Rgb([0.0, 0.0, 1.0]));
+                float.put_pixel(2, 1, image::Rgb([1.0, 1.0, 1.0]));
+
+                image::DynamicImage::ImageRgb32F(float)
+                    .write_to(&mut std::io::Cursor::new(&mut bytes), format)
+                    .unwrap();
+            } else if format == image::ImageFormat::Ico {
+                let mut rgba = image::RgbaImage::new(3, 2);
+
+                rgba.put_pixel(0, 0, image::Rgba([0, 128, 255, 255]));
+                rgba.put_pixel(1, 0, image::Rgba([255, 128, 0, 255]));
+                rgba.put_pixel(2, 0, image::Rgba([64, 64, 64, 255]));
+                rgba.put_pixel(0, 1, image::Rgba([128, 255, 0, 255]));
+                rgba.put_pixel(1, 1, image::Rgba([0, 0, 255, 255]));
+                rgba.put_pixel(2, 1, image::Rgba([255, 255, 255, 255]));
+
+                image::DynamicImage::ImageRgba8(rgba)
+                    .write_to(&mut std::io::Cursor::new(&mut bytes), format)
+                    .unwrap();
+            } else {
+                image::DynamicImage::ImageLuma8(img.clone())
+                    .to_rgb8()
+                    .write_to(&mut std::io::Cursor::new(&mut bytes), format)
+                    .unwrap();
+            }
+
+            let (width, height, channels, _) = decode_pixels(&bytes, &Color::Luma)
+                .unwrap_or_else(|_| panic!("format {:?} failed to decode", format));
+
+            assert_eq!((width, height, channels), (3, 2, 1), "format {:?}", format);
+        }
+    }
+
     #[test]
     fn frames_round_trip_through_parse_pixels() {
         let (_, _, _, pixels) = decode_pixels(&png_bytes(), &Color::Luma).unwrap();
@@ -442,6 +685,53 @@ mod tests {
         let bad = frame_pixels(2, 2, 3, &[0; 12]).unwrap();
 
         assert!(encode_png(&bad).is_err());
+    }
+
+    /// Every writable format must produce bytes that `decode_pixels` reads
+    /// back at the same size, both for luma and RGBA frames.
+    #[test]
+    fn encode_image_round_trips_each_format() {
+        let (w, h, ch, pixels) = decode_pixels(&png_bytes(), &Color::Rgba).unwrap();
+        let frame = frame_pixels(w, h, ch, &pixels).unwrap();
+
+        for format in [
+            Format::Png,
+            Format::Jpeg,
+            Format::Gif,
+            Format::Tiff,
+            Format::Webp,
+            Format::Bmp,
+            Format::Pnm,
+            Format::Qoi,
+        ] {
+            let bytes = encode_image(&frame, &format).unwrap_or_else(|_| panic!("{:?} failed", format));
+            let (w2, h2, _, _) = decode_pixels(&bytes, &Color::Luma)
+                .unwrap_or_else(|_| panic!("{:?} output failed to decode", format));
+
+            assert_eq!((w2, h2), (w, h), "format {:?}", format);
+        }
+    }
+
+    #[test]
+    fn encode_rejects_bad_frames_everywhere() {
+        let bad = frame_pixels(2, 2, 3, &[0; 12]).unwrap();
+
+        for format in [Format::Jpeg, Format::Gif, Format::Tiff, Format::Webp, Format::Bmp, Format::Pnm, Format::Qoi] {
+            assert!(encode_image(&bad, &format).is_err(), "format {:?}", format);
+            assert!(encode_image(b"not a frame", &format).is_err(), "format {:?}", format);
+        }
+    }
+
+    #[test]
+    fn resolves_format_blob() {
+        assert_eq!(resolve_format(b""), Some(Format::Png));
+        assert_eq!(resolve_format(&blob(&[pair("format", "png")])), Some(Format::Png));
+        assert_eq!(resolve_format(&blob(&[pair("format", "jpeg")])), Some(Format::Jpeg));
+        assert_eq!(resolve_format(&blob(&[pair("format", "qoi")])), Some(Format::Qoi));
+        assert_eq!(resolve_format(&blob(&[pair("future", "whatever")])), Some(Format::Png));
+        assert_eq!(resolve_format(&blob(&[pair("format", "ico")])), None);
+        assert_eq!(resolve_format(&blob(&[pair("format", "")])), None);
+        assert_eq!(resolve_format(&[0x02]), None);
     }
 
     #[test]

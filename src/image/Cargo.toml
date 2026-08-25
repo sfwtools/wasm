@@ -4,7 +4,7 @@ description = "Decode PNG and JPEG images into raw pixel frames."
 edition = "2021"
 license = "AGPL-3.0"
 name = "image"
-version = "0.1.1"
+version = "0.1.2"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -23,15 +23,19 @@ crc32fast = "1.5"
 # flate2/miniz_oxide out of the artifact: png 0.17 declares flate2 as a
 # non-optional dep, so any use of png::Encoder would link it.
 fdeflate = "0.3"
-# Input decoding: PNG (screenshots) + JPEG (phone photos), all other formats
-# off so the artifact stays as small as the set allows. Encoding does NOT go
-# through this crate's writer: encode_png builds the PNG container directly
-# with fdeflate + crc32fast, so the png encoder and flate2 stay dead-stripped.
+# Input decoding: PNG (screenshots), JPEG (phone photos), plus GIF, TIFF, and
+# WebP so the module reads the common web and office formats, and the
+# near-free built-in formats BMP/PNM/HDR/ICO/QOI. TGA is excluded: the image
+# crate's format guessing has no TGA magic bytes, so load_from_memory cannot
+# auto-detect it. Other formats (avif/exr/dds) stay off to keep the artifact
+# small. Encoding does NOT go through this crate's writer: encode_png builds
+# the PNG container directly with fdeflate + crc32fast, so the png encoder and
+# flate2 stay dead-stripped.
 #
 # Pinned to exactly 0.25.5: newer 0.25.x pulls moxcms/pxfm (ICC color
 # management) unconditionally, costing ~68 KB for transforms we never ask
 # for; embedded ICC profiles are ignored, which is fine for QR sources.
-image = { version = "=0.25.5", default-features = false, features = ["png", "jpeg"] }
+image = { version = "=0.25.5", default-features = false, features = ["png", "jpeg", "gif", "tiff", "webp", "bmp", "pnm", "hdr", "ico", "qoi"] }
 
 [profile.release]
 codegen-units = 1
