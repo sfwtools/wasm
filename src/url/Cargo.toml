@@ -1,0 +1,22 @@
+[package]
+authors = ["Alex Morales", "sfw.tools", "sfwtools.com"]
+description = "Percent-encode and decode URL text."
+edition = "2021"
+license = "AGPL-3.0"
+name = "url"
+version = "0.1.0"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Shared raw-ABI transport layer (packing, options blob); compiles into this
+# module's artifact like any other dependency.
+abi = { path = "../abi" }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true

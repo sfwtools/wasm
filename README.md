@@ -6,7 +6,12 @@ Built by `npm run build` into `dist/<id>.wasm`.
 
 | Tool | Name | Description |
 | --- | --- | --- |
-| `base64` | base64 | Encode a string to base64. |
+| `base64` | base64 | Encode/decode base64. |
+| `random` | random | Generate random strings. |
+| `qr` | qr | QR codes: SVG or RGBA frames, decode from luma frames. |
+| `image` | image | Decode 11 image formats to pixel frames; encode 8 formats. |
+| `barcode` | barcode | 1D barcodes: SVG or RGBA frames (encode only). |
+| `url` | url | Percent-encode/decode URL text. |
 
 ## Testing
 
