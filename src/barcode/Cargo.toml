@@ -1,0 +1,26 @@
+[package]
+authors = ["Alex Morales", "sfw.tools", "sfwtools.com"]
+description = "Create 1D barcodes as SVG or RGBA pixel frames from text."
+edition = "2021"
+license = "AGPL-3.0"
+name = "barcode"
+version = "0.1.0"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Shared raw-ABI transport layer (packing, options blob, pixel frame);
+# compiles into this module's artifact like any other dependency.
+abi = { path = "../abi" }
+# Pure-Rust barcode encoder for the common 1D symbologies. Generator
+# features (ascii/json/svg/image) stay off: this core renders its own SVG
+# and RGBA frames from the module bits, exactly like qr does for QR codes.
+barcoders = { version = "2.0", default-features = false, features = ["std"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true
