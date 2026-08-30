@@ -12,6 +12,7 @@ Built by `npm run build` into `dist/<id>.wasm`.
 | `image` | image | Decode 11 image formats to pixel frames; encode 8 formats. |
 | `barcode` | barcode | 1D barcodes: SVG or RGBA frames (encode only). |
 | `url` | url | Percent-encode/decode URL text. |
+| `pdf` | pdf | Assemble a PDF from pages of the inputs (reorder/delete/merge/rotate/blank). |
 
 ## Testing
 

@@ -213,3 +213,114 @@ pub fn parse_pixels(frame: &[u8]) -> Option<(u32, u32, u8, &[u8])> {
 
     Some((width, height, channels, pixels))
 }
+
+/// Serialize a list of (name, bytes) files into the file-input wire frame:
+/// magic byte, count, then per file a length-prefixed UTF-8 name and a
+/// length-prefixed binary payload (little-endian throughout). This is the
+/// standard shape for exports that accept multiple binary inputs (e.g. a PDF
+/// page assembler that takes several documents); the magic + count framing
+/// mirrors `frame_strings` so both input directions of the wire share one
+/// convention.
+pub fn frame_files(files: &[(&str, &[u8])]) -> Vec<u8> {
+    let mut blob = Vec::new();
+    blob.push(OUTPUT_MAGIC);
+    blob.extend_from_slice(&(files.len() as u32).to_le_bytes());
+
+    for (name, data) in files {
+        blob.extend_from_slice(&(name.len() as u32).to_le_bytes());
+        blob.extend_from_slice(name.as_bytes());
+        blob.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        blob.extend_from_slice(data);
+    }
+
+    blob
+}
+
+/// Parse the file-input wire frame produced by `frame_files` into its parts.
+/// Returns `None` on any framing error: wrong magic, truncated header, a
+/// length that overruns the buffer, or a zero-length payload (a file with no
+/// bytes cannot be a real document and is rejected rather than passed on).
+pub fn parse_files(frame: &[u8]) -> Option<Vec<(&[u8], &[u8])>> {
+    if frame.is_empty() || frame[0] != OUTPUT_MAGIC {
+        return None;
+    }
+
+    let mut rest = &frame[1..];
+    let (count, after_count) = read_u32(rest)?;
+    let mut files = Vec::with_capacity(count as usize);
+    rest = after_count;
+
+    for _ in 0..count {
+        let (name_len, after_name_len) = read_u32(rest)?;
+        let name_len = name_len as usize;
+
+        if after_name_len.len() < name_len {
+            return None;
+        }
+
+        let (name, after_name) = after_name_len.split_at(name_len);
+        let (data_len, after_data_len) = read_u32(after_name)?;
+        let data_len = data_len as usize;
+
+        if after_data_len.len() < data_len {
+            return None;
+        }
+
+        let (data, tail) = after_data_len.split_at(data_len);
+
+        if data.is_empty() {
+            return None;
+        }
+
+        files.push((name, data));
+        rest = tail;
+    }
+
+    Some(files)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_frame_round_trips() {
+        let files = vec![("a.pdf", b"AAA".as_slice()), ("b.pdf", b"BBBBB".as_slice())];
+        let frame = frame_files(&files);
+        let parsed = parse_files(&frame).expect("parse");
+
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0], (b"a.pdf".as_slice(), b"AAA".as_slice()));
+        assert_eq!(parsed[1], (b"b.pdf".as_slice(), b"BBBBB".as_slice()));
+    }
+
+    #[test]
+    fn file_frame_empty_is_valid_but_rejects_empty_payload() {
+        let frame = frame_files(&[]);
+        assert_eq!(parse_files(&frame), Some(Vec::new()));
+
+        let frame = frame_files(&[("x.pdf", b"".as_slice())]);
+        assert_eq!(parse_files(&frame), None);
+    }
+
+    #[test]
+    fn file_frame_rejects_malformed() {
+        assert_eq!(parse_files(b""), None);
+        assert_eq!(parse_files(b"\x02"), None);
+        assert_eq!(parse_files(b"\x01\x00\x00\x00\x00"), Some(Vec::new()));
+
+        // Truncated name length.
+        assert_eq!(parse_files(b"\x01\x01\x00\x00\x00"), None);
+
+        // Name length overruns the buffer.
+        assert_eq!(parse_files(b"\x01\x01\x00\x00\x00\xFF\x00\x00\x00"), None);
+    }
+
+    #[test]
+    fn parse_usize_edge_cases() {
+        assert_eq!(parse_usize(b""), None);
+        assert_eq!(parse_usize(b"12x"), None);
+        assert_eq!(parse_usize(b"99999999999999999999999"), None);
+        assert_eq!(parse_usize(b"42"), Some(42));
+    }
+}

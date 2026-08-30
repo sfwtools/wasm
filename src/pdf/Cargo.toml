@@ -1,0 +1,27 @@
+[package]
+authors = ["Alex Morales", "sfw.tools", "sfwtools.com"]
+description = "Assemble a new PDF from pages of the input PDFs."
+edition = "2021"
+license = "AGPL-3.0"
+name = "pdf"
+version = "0.1.0"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Shared raw-ABI transport layer (packing, options blob, file frame); compiles
+# into this module's artifact like any other dependency.
+abi = { path = "../abi" }
+# The page-tree rebuild is lopdf's sweet spot. Default features pull chrono/
+# jiff/time (PDF date helpers) and rayon (parallel parse) we do not need; the
+# getrandom_backend cfg in .cargo/config.toml keeps lopdf's encryption deps
+# import-free on wasm (see the comment there).
+lopdf = { version = "0.44.0", default-features = false }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true

@@ -1,0 +1,14 @@
+# Every module must export its linear memory so a host can read/write the
+# input/output buffers. Scoped to the wasm target only; native builds must NOT
+# pass these flags.
+#
+# getrandom_backend="unsupported": lopdf links getrandom (for PDF encryption),
+# and on wasm32-unknown-unknown getrandom's default is to pull wasm-bindgen JS
+# glue - which would break the no-imports raw-ABI contract. The `unsupported`
+# backend always returns Err(UNSUPPORTED) with zero imports; our assemble path
+# never uses randomness, and encrypted-PDF loading simply fails cleanly.
+[target.wasm32-unknown-unknown]
+rustflags = [
+    "-C", "link-arg=--export-memory",
+    "--cfg", "getrandom_backend=\"unsupported\"",
+]

@@ -131,3 +131,63 @@ export const parsePixels = (frame) => {
     width
   };
 };
+
+// Serialize a list of named binary files into the file-input wire frame the
+// pdf module parses: 0x01 magic, count, then per file nameLen/name and
+// dataLen/data (little-endian u32 lengths throughout).
+export const frameFiles = (files) => {
+  const encoder = new TextEncoder();
+  const chunks = [Uint8Array.of(0x01, ...new Uint8Array(4))];
+  const countView = new DataView(chunks[0].buffer, chunks[0].byteOffset);
+
+  countView.setUint32(1, files.length, true);
+
+  for(const { name, data } of files) {
+    const nameBytes = encoder.encode(name);
+    const chunk = new Uint8Array(4 + nameBytes.length + 4 + data.length);
+    const view = new DataView(chunk.buffer);
+
+    view.setUint32(0, nameBytes.length, true);
+    chunk.set(nameBytes, 4);
+    view.setUint32(4 + nameBytes.length, data.length, true);
+    chunk.set(data, 8 + nameBytes.length);
+
+    chunks.push(chunk);
+  }
+
+  const blob = new Uint8Array(chunks.reduce((sum, chunk) => sum + chunk.length, 0));
+  let offset = 0;
+
+  for(const chunk of chunks) {
+    blob.set(chunk, offset);
+    offset += chunk.length;
+  }
+
+  return blob;
+};
+
+// Walk the file-input wire frame back into its named payloads.
+export const parseFiles = (frame) => {
+  if(frame[0] !== 0x01)
+    throw new Error('file frame magic mismatch');
+
+  const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
+  const count = view.getUint32(1, true);
+  let offset = 5;
+  const files = [];
+
+  for(let i = 0; i < count; i += 1) {
+    const nameLen = view.getUint32(offset, true);
+    offset += 4;
+    const name = new TextDecoder().decode(frame.subarray(offset, offset + nameLen));
+    offset += nameLen;
+    const dataLen = view.getUint32(offset, true);
+    offset += 4;
+    const data = frame.subarray(offset, offset + dataLen);
+    offset += dataLen;
+
+    files.push({ name, data });
+  }
+
+  return files;
+};
