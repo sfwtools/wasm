@@ -47,8 +47,10 @@ const inspectPdf = (bytes) => {
   // Count /Type /Page (not /Pages) objects.
   const pages = (text.match(/\/Type\s*\/Page[^s]/g) || []).length;
   const rotates = [...text.matchAll(/\/Rotate\s+(\d+)/g)].map((m) => Number(m[1]));
+  const mediaBoxes = [...text.matchAll(/\/MediaBox\s*\[\s*0\s+0\s+(\d+)\s+(\d+)\s*\]/g)]
+    .map((m) => [Number(m[1]), Number(m[2])]);
 
-  return { pages, rotates };
+  return { mediaBoxes, pages, rotates };
 };
 
 const main = async () => {
@@ -97,6 +99,12 @@ const main = async () => {
   expect(blankOut, 'blank-only assemble failed');
   expect(inspectPdf(blankOut).pages === 1, 'blank document page count mismatch');
 
+  // An explicit blank page must preserve the requested dimensions.
+  const customBlank = runExport(instance.exports, 'assemble', frame, { pages:'[["blank",1000,500]]' });
+  expect(customBlank, 'custom blank assemble failed');
+  expect(inspectPdf(customBlank).mediaBoxes.some(([width, height]) => width === 1000 && height === 500),
+    'custom blank dimensions mismatch');
+
   // Reordering a two-page source is not possible with a single-page fixture,
   // so feed the same file twice (as two distinct inputs) and interleave.
   const twoFrame = frameFiles([
@@ -122,6 +130,8 @@ const main = async () => {
     'invalid rotation was not rejected');
   expect(runExport(instance.exports, 'assemble', frame, { pages:'[not json' }) === null,
     'malformed pages JSON was not rejected');
+  expect(runExport(instance.exports, 'assemble', frame, { pages:'[["blank",0,500]]' }) === null,
+    'invalid blank dimensions were not rejected');
 
   // Unknown options are ignored by design.
   const withUnknown = runExport(instance.exports, 'assemble', frame, { future:'whatever', pages:'[[0,0]]' });

@@ -73,7 +73,11 @@ Each entry is one of:
 - `[file, page]` — the page at 0-based `page` from the 0-based `file` input.
 - `[file, page, rotate]` — same, with `rotate` in `0`/`90`/`180`/`270`
   (clockwise, added to the page's existing rotation).
+- `[file, page, "blank"]` — an empty page with the selected source page's
+  dimensions.
 - `"blank"` — an empty Letter page (612 x 792 pt).
+- `["blank", width, height]` — an empty page with explicit dimensions in
+  integer PDF points. Dimensions must be between 1 and 14,400 points.
 
 Examples:
 
@@ -81,13 +85,16 @@ Examples:
 - Delete pages by omitting them `[[0,0],[0,2]]`
 - Merge two files `[[0,0],[0,1],[1,0],[1,2]]`
 - Insert a blank separator `[[0,0],"blank",[0,1]]`
+- Insert a source-sized blank page `[[0,0,"blank"]]`
+- Insert an A4-sized blank page `[["blank",595,842]]`
 - Rotate a page `[[0,1,90]]`
 
 Out-of-range file/page indices, a bad rotation, malformed JSON, or an empty
 selection are all rejected (result `0`); a request never produces a partial
 document. Page order follows the selection exactly. Each source PDF's own
-MediaBox and resources are preserved; outlines are dropped (their cross-doc
-references cannot survive a rebuild).
+MediaBox and resources are preserved; explicit blank pages use the requested
+MediaBox; outlines are dropped (their cross-doc references cannot survive a
+rebuild).
 
 ## License
 

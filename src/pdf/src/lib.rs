@@ -43,7 +43,7 @@ const MANIFEST: &str = r#"{
         "pages": {
           "type": "text",
           "default": "[]",
-          "description": "JSON array of page entries in output order. Each entry is [file,page] or [file,page,rotate] where rotate is 0/90/180/270 (clockwise, added to the page's existing rotation), or \"blank\" for an empty Letter page."
+       "description": "JSON array of page entries in output order. Each entry is [file,page] or [file,page,rotate] where rotate is 0/90/180/270 (clockwise, added to the page's existing rotation), \"blank\" for an empty Letter page, or [\"blank\",width,height] for an empty page with dimensions in PDF points."
         }
       }
     }
@@ -55,8 +55,25 @@ const MANIFEST: &str = r#"{
 enum Entry {
     /// A page from a loaded file: (file index, 0-based page index).
     Page { file: usize, page: usize },
-    /// A blank Letter page (612 x 792 pt).
-    Blank,
+    /// A blank page. Source references inherit that page's MediaBox; explicit
+    /// dimensions are integer PDF points.
+    Blank { file: Option<usize>, page: Option<usize>, width: Option<u32>, height: Option<u32> },
+}
+
+const DEFAULT_PAGE_HEIGHT: u32 = 792;
+const DEFAULT_PAGE_WIDTH: u32 = 612;
+const MAX_PAGE_DIMENSION: u32 = 14_400;
+
+/// Accept dimensions large enough for normal PDF pages while rejecting values
+/// that could create unreasonable allocations or invalid page geometry.
+fn parse_dimension(value: &[u8]) -> Option<u32> {
+    let dimension = abi::parse_usize(value)?;
+
+    if dimension == 0 || dimension > MAX_PAGE_DIMENSION as usize {
+        return None;
+    }
+
+    Some(dimension as u32)
 }
 
 /// Rotation applied to a page, in whole clockwise degrees.
@@ -91,8 +108,10 @@ impl Rotation {
 }
 
 /// Parse the `pages` option: a strict JSON array of entries. An entry is
-/// either a 2- or 3-element array of integers `[file, page, rotate?]` or the
-/// string `"blank"`. Returns `None` on any malformed JSON, non-array entry,
+/// either a 2- or 3-element array of integers `[file, page, rotate?]`, a
+/// source-sized blank `[file, page, "blank"]`, an explicit blank
+/// `["blank", width, height]`, or the string `"blank"`.
+/// Returns `None` on any malformed JSON, non-array entry,
 /// or out-of-range index, so a bad request is a rejection (result 0), never a
 /// partial document. This is deliberately a minimal parser for exactly this
 /// shape - no floats, no objects, no escapes beyond what an integer can hold.
@@ -138,7 +157,26 @@ fn parse_pages(pages: &[u8]) -> Option<Vec<(Entry, Rotation)>> {
                 return None;
             }
 
-            (Entry::Blank, Rotation::Zero)
+            (Entry::Blank { file: None, page: None, width: None, height: None }, Rotation::Zero)
+        } else if is_blank_array(&p) {
+            // An explicit blank page: ["blank", width, height].
+            p.expect(b'[')?;
+            p.skip_ws();
+            if p.read_string()? != b"blank" {
+                return None;
+            }
+            p.skip_ws();
+            p.expect(b',')?;
+            p.skip_ws();
+            let width = parse_dimension(p.read_token()?)?;
+            p.skip_ws();
+            p.expect(b',')?;
+            p.skip_ws();
+            let height = parse_dimension(p.read_token()?)?;
+            p.skip_ws();
+            p.expect(b']')?;
+
+            (Entry::Blank { file: None, page: None, width: Some(width), height: Some(height) }, Rotation::Zero)
         } else {
             // A page entry: [file, page, rotate?].
             p.expect(b'[')?;
@@ -151,19 +189,27 @@ fn parse_pages(pages: &[u8]) -> Option<Vec<(Entry, Rotation)>> {
 
             let page = p.read_usize()?;
             let mut rotation = Rotation::Zero;
+            let mut special_entry = None;
 
             p.skip_ws();
 
             if p.peek() == Some(b',') {
                 p.bump();
                 p.skip_ws();
-                rotation = Rotation::parse(&p.read_token()?)?;
+                if p.peek() == Some(b'"') {
+                    if p.read_string()? != b"blank" {
+                        return None;
+                    }
+                    special_entry = Some((Entry::Blank { file: Some(file), page: Some(page), width: None, height: None }, Rotation::Zero));
+                } else {
+                    rotation = Rotation::parse(&p.read_token()?)?;
+                }
                 p.skip_ws();
             }
 
             p.expect(b']')?;
 
-            (Entry::Page { file, page }, rotation)
+            special_entry.unwrap_or((Entry::Page { file, page }, rotation))
         };
 
         out.push((entry, rotation));
@@ -177,6 +223,16 @@ fn parse_pages(pages: &[u8]) -> Option<Vec<(Entry, Rotation)>> {
     }
 
     Some(out)
+}
+
+/// Detect an explicit blank array without consuming the real cursor.
+fn is_blank_array(p: &JsonCursor) -> bool {
+    let mut probe = JsonCursor { bytes: p.bytes, pos: p.pos };
+
+    probe.expect(b'[');
+    probe.skip_ws();
+
+    probe.read_string().as_deref() == Some(b"blank")
 }
 
 /// A minimal byte cursor for the strict pages-JSON parser above.
@@ -239,6 +295,25 @@ impl<'a> JsonCursor<'a> {
         }
 
         self.bytes.get(start..self.pos)
+    }
+
+    fn read_string(&mut self) -> Option<Vec<u8>> {
+        self.expect(b'"')?;
+        let mut value = Vec::new();
+
+        while let Some(byte) = self.peek() {
+            if byte == b'"' {
+                self.bump();
+                return Some(value);
+            }
+            if byte == b'\\' {
+                return None;
+            }
+            value.push(byte);
+            self.bump();
+        }
+
+        None
     }
 }
 
@@ -329,14 +404,25 @@ fn assemble_pdf(files: &[(Vec<u8>, Vec<u8>)], pages: &[(Entry, Rotation)]) -> Re
 
     for (entry, rotation) in pages {
         match entry {
-            Entry::Blank => {
+            Entry::Blank { file, page, width, height } => {
                 let page_id = out.new_object_id();
+                let media_box = match (width, height) {
+                    (Some(width), Some(height)) => vec![0.into(), 0.into(), (*width).into(), (*height).into()].into(),
+                    _ => file
+                    .and_then(|file| page.and_then(|page| page_order.get(file).and_then(|order| order.get(page).copied())))
+                    .and_then(|page_id| page_objects.iter().find_map(|pages| pages.get(&page_id)))
+                    .and_then(|object| object.as_dict().ok())
+                    .and_then(|dict| dict.get(b"MediaBox").ok())
+                    .cloned()
+                    .unwrap_or_else(|| vec![0.into(), 0.into(), DEFAULT_PAGE_WIDTH.into(), DEFAULT_PAGE_HEIGHT.into()].into()),
+                };
+
                 out.set_object(
                     page_id,
                     dictionary! {
                         "Type" => "Page",
                         "Parent" => pages_id,
-                        "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+                        "MediaBox" => media_box,
                     },
                 );
                 kid_ids.push(page_id);
@@ -359,8 +445,9 @@ fn assemble_pdf(files: &[(Vec<u8>, Vec<u8>)], pages: &[(Entry, Rotation)]) -> Re
                     dict.set("Rotate", (current + rotation.degrees()) % 360);
                 }
 
-                out.set_object(page_id, Object::Dictionary(dict));
-                kid_ids.push(page_id);
+                let output_page_id = out.new_object_id();
+                out.set_object(output_page_id, Object::Dictionary(dict));
+                kid_ids.push(output_page_id);
             }
         }
     }
@@ -532,11 +619,12 @@ mod tests {
     #[test]
     fn parse_pages_basic_entries() {
         assert_eq!(
-            parse_pages(b"[[0,1],[0,2,90],\"blank\"]"),
+            parse_pages(b"[[0,1],[0,2,90],[\"blank\",612,792],\"blank\"]"),
             Some(vec![
                 (Entry::Page { file: 0, page: 1 }, Rotation::Zero),
                 (Entry::Page { file: 0, page: 2 }, Rotation::Ninety),
-                (Entry::Blank, Rotation::Zero),
+                (Entry::Blank { file: None, page: None, width: Some(612), height: Some(792) }, Rotation::Zero),
+                (Entry::Blank { file: None, page: None, width: None, height: None }, Rotation::Zero),
             ])
         );
     }
@@ -558,6 +646,10 @@ mod tests {
         assert_eq!(parse_pages(b"[\"x\"]"), None);
         assert_eq!(parse_pages(b"[[0,1]"), None);    // Unclosed.
         assert_eq!(parse_pages(b"[[0,1]]x"), None);  // Trailing garbage.
+        assert_eq!(parse_pages(b"[[\"blank\",612,0]]"), None); // Zero dimension.
+        assert_eq!(parse_pages(b"[[\"blank\",14401,792]]"), None); // Excessive dimension.
+        assert_eq!(parse_pages(b"[[\"blank\",612]]"), None); // Missing height.
+        assert_eq!(parse_pages(b"[[\"blank\",612.5,792]]"), None); // No fractional points.
     }
 
     #[test]
@@ -581,7 +673,7 @@ mod tests {
     fn assemble_pdf_blank_page_round_trip() {
         let pdf = make_pdf("hello");
         let files = vec![(b"a.pdf".to_vec(), pdf.clone())];
-        let pages = vec![(Entry::Blank, Rotation::Zero)];
+        let pages = vec![(Entry::Blank { file: None, page: None, width: None, height: None }, Rotation::Zero)];
 
         let bytes = assemble_pdf(&files, &pages).expect("assemble");
         let out = Document::load_mem(&bytes).expect("load output");
@@ -590,6 +682,21 @@ mod tests {
         // The blank page is empty: no Contents.
         let page_id = out.get_pages().get(&1).copied().expect("page 1");
         let dict = out.get_object(page_id).unwrap().as_dict().unwrap();
+        assert!(!dict.has(b"Contents"));
+    }
+
+    #[test]
+    fn assemble_pdf_custom_blank_page_uses_dimensions() {
+        let pdf = make_pdf("hello");
+        let files = vec![(b"a.pdf".to_vec(), pdf)];
+        let pages = vec![(Entry::Blank { file: None, page: None, width: Some(1000), height: Some(500) }, Rotation::Zero)];
+
+        let bytes = assemble_pdf(&files, &pages).expect("assemble");
+        let out = Document::load_mem(&bytes).expect("load output");
+        let page_id = out.get_pages().get(&1).copied().expect("page 1");
+        let dict = out.get_object(page_id).unwrap().as_dict().unwrap();
+
+        assert_eq!(dict.get(b"MediaBox").unwrap(), &vec![0.into(), 0.into(), 1000.into(), 500.into()].into());
         assert!(!dict.has(b"Contents"));
     }
 
@@ -656,6 +763,25 @@ mod tests {
         let out = Document::load_mem(&bytes).expect("load output");
 
         assert_eq!(out.get_pages().len(), 2);
+    }
+
+    #[test]
+    fn assemble_pdf_duplicates_page_with_same_dimensions() {
+        let pdf = make_pdf("hello");
+        let files = vec![(b"a.pdf".to_vec(), pdf)];
+        let pages = vec![
+            (Entry::Page { file: 0, page: 0 }, Rotation::Zero),
+            (Entry::Page { file: 0, page: 0 }, Rotation::Zero),
+        ];
+
+        let bytes = assemble_pdf(&files, &pages).expect("assemble");
+        let out = Document::load_mem(&bytes).expect("load output");
+        let page_ids: Vec<ObjectId> = out.get_pages().values().copied().collect();
+        let first = out.get_object(page_ids[0]).unwrap().as_dict().unwrap();
+        let second = out.get_object(page_ids[1]).unwrap().as_dict().unwrap();
+
+        assert_ne!(page_ids[0], page_ids[1]);
+        assert_eq!(first.get(b"MediaBox").unwrap(), second.get(b"MediaBox").unwrap());
     }
 
     #[test]
