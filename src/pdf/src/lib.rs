@@ -636,6 +636,14 @@ mod tests {
     }
 
     #[test]
+    fn parse_pages_source_sized_blank() {
+        assert_eq!(
+            parse_pages(b"[[0,0,\"blank\"]]"),
+            Some(vec![(Entry::Blank { file: Some(0), page: Some(0), width: None, height: None }, Rotation::Zero)])
+        );
+    }
+
+    #[test]
     fn parse_pages_rejects_malformed() {
         assert_eq!(parse_pages(b""), None);
         assert_eq!(parse_pages(b"[0,1]"), None);

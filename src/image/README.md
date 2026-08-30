@@ -69,12 +69,16 @@ rather than being silently dropped.
 
 | Key      | Values            | Default | Description                                        |
 | -------- | ----------------- | ------- | -------------------------------------------------- |
-| `color`  | `luma`,`rgba`     | `luma`  | Sample layout of the returned pixels (`decode` only) |
-| `format` | see below         | `png`   | Output format (`encode` only)                      |
+| `color`   | `luma`,`rgba` | `luma` | Sample layout of the returned pixels (`decode` only) |
+| `format`  | see below     | `png`  | Output format (`encode` only) |
+| `quality` | `1`-`100`     | `85`   | JPEG quality (`encode` only; ignored by other formats) |
 
 `format` accepts `png`, `jpeg`, `gif`, `tiff`, `webp`, `bmp`, `pnm`, `qoi`.
-JPEG and PNM take RGB input (their encoders/decoders drop or lack alpha);
-the rest accept luma (widened to RGB) or RGBA frames.
+`quality` controls JPEG compression from 1 to 100; higher values preserve more
+detail and usually produce larger files. WebP remains lossless in this module,
+so quality does not affect it. JPEG and PNM take RGB input (their
+encoders/decoders drop or lack alpha); the rest accept luma (widened to RGB) or
+RGBA frames.
 
 ## Output: the pixel frame
 

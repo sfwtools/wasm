@@ -58,6 +58,11 @@ const MANIFEST: &str = r#"{
           "values": ["png", "jpeg", "gif", "tiff", "webp", "bmp", "pnm", "qoi"],
           "default": "png",
           "description": "Output format. PNG is the default (compressed, fdeflate); the others use the image crate's own encoders."
+        },
+        "quality": {
+          "type": "number",
+          "default": 85,
+          "description": "JPEG quality from 1 to 100. Ignored by formats without a quality setting."
         }
       }
     }
@@ -112,6 +117,23 @@ impl Format {
             _ => None,
         }
     }
+}
+
+const DEFAULT_QUALITY: u8 = 85;
+const MAX_QUALITY: usize = 100;
+const MIN_QUALITY: usize = 1;
+
+/// Parse the shared quality option. The value is meaningful to JPEG; keeping
+/// it on the common encode options lets hosts use one stable schema while
+/// other formats retain their native behavior.
+fn parse_quality(value: &[u8]) -> Option<u8> {
+    let quality = abi::parse_usize(value)?;
+
+    if !(MIN_QUALITY..=MAX_QUALITY).contains(&quality) {
+        return None;
+    }
+
+    Some(quality as u8)
 }
 
 /// Decode `bytes` (a PNG or JPEG file, auto-detected) into raw samples laid
@@ -227,8 +249,9 @@ pub fn encode_png(frame: &[u8]) -> Result<Vec<u8>, &'static str> {
 /// Encode a raw pixel frame into the requested `format`. PNG uses the
 /// hand-rolled fdeflate writer (keeps flate2 out of the artifact); every
 /// other format rides on the image crate's own encoder for that codec, which
-/// is already linked because the same features drive `decode`.
-pub fn encode_image(frame: &[u8], format: &Format) -> Result<Vec<u8>, &'static str> {
+/// is already linked because the same features drive `decode`. `quality` is
+/// used by JPEG and ignored by formats without a quality setting.
+pub fn encode_image(frame: &[u8], format: &Format, quality: u8) -> Result<Vec<u8>, &'static str> {
     if *format == Format::Png {
         return encode_png(frame);
     }
@@ -290,7 +313,8 @@ pub fn encode_image(frame: &[u8], format: &Format) -> Result<Vec<u8>, &'static s
 
     let result = match format {
         Format::Jpeg => {
-            image::codecs::jpeg::JpegEncoder::new(&mut writer).write_image(&raw, width, height, color_type)
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut writer, quality)
+                .write_image(&raw, width, height, color_type)
         }
         Format::Gif => image::codecs::gif::GifEncoder::new(&mut writer)
             .encode(&raw, width, height, color_type),
@@ -346,19 +370,22 @@ fn resolve_color(blob: &[u8]) -> Option<Color> {
     Some(color)
 }
 
-/// Parse the options blob straight into a resolved `Format` for `encode`.
-/// Framing is validated by the shared `option_pairs`; an empty blob means
-/// PNG. Unknown keys are ignored; an unknown `format` value is an error.
-fn resolve_format(blob: &[u8]) -> Option<Format> {
+/// Parse the options blob straight into resolved `encode` options. Framing is
+/// validated by the shared `option_pairs`; an empty blob means PNG at quality
+/// 85. Unknown keys are ignored; known values with bad values are errors.
+fn resolve_options(blob: &[u8]) -> Option<(Format, u8)> {
     let mut format = Format::Png;
+    let mut quality = DEFAULT_QUALITY;
 
     for (key, value) in option_pairs(blob)? {
-        if key == b"format" {
-            format = Format::parse(value)?;
+        match key {
+            b"format" => format = Format::parse(value)?,
+            b"quality" => quality = parse_quality(value)?,
+            _ => {}
         }
     }
 
-    Some(format)
+    Some((format, quality))
 }
 
 /// Allocate a write buffer of exactly `len` bytes. The caller passes the
@@ -429,18 +456,18 @@ pub unsafe extern "C" fn decode(ptr: u32, len: u32, opts_ptr: u32, opts_len: u32
 pub unsafe extern "C" fn encode(ptr: u32, len: u32, opts_ptr: u32, opts_len: u32) -> u64 {
     let input = std::slice::from_raw_parts(ptr as *const u8, len as usize);
 
-    let format = if opts_len == 0 {
-        Format::Png
+    let (format, quality) = if opts_len == 0 {
+        (Format::Png, DEFAULT_QUALITY)
     } else {
         let blob = std::slice::from_raw_parts(opts_ptr as *const u8, opts_len as usize);
 
-        match resolve_format(blob) {
-            Some(format) => format,
+        match resolve_options(blob) {
+            Some(options) => options,
             None => return 0,
         }
     };
 
-    match encode_image(input, &format) {
+    match encode_image(input, &format, quality) {
         Ok(bytes) => abi::pack(bytes),
         Err(_) => 0,
     }
@@ -704,7 +731,7 @@ mod tests {
             Format::Pnm,
             Format::Qoi,
         ] {
-            let bytes = encode_image(&frame, &format).unwrap_or_else(|_| panic!("{:?} failed", format));
+            let bytes = encode_image(&frame, &format, DEFAULT_QUALITY).unwrap_or_else(|_| panic!("{:?} failed", format));
             let (w2, h2, _, _) = decode_pixels(&bytes, &Color::Luma)
                 .unwrap_or_else(|_| panic!("{:?} output failed to decode", format));
 
@@ -717,21 +744,33 @@ mod tests {
         let bad = frame_pixels(2, 2, 3, &[0; 12]).unwrap();
 
         for format in [Format::Jpeg, Format::Gif, Format::Tiff, Format::Webp, Format::Bmp, Format::Pnm, Format::Qoi] {
-            assert!(encode_image(&bad, &format).is_err(), "format {:?}", format);
-            assert!(encode_image(b"not a frame", &format).is_err(), "format {:?}", format);
+            assert!(encode_image(&bad, &format, DEFAULT_QUALITY).is_err(), "format {:?}", format);
+            assert!(encode_image(b"not a frame", &format, DEFAULT_QUALITY).is_err(), "format {:?}", format);
         }
     }
 
     #[test]
-    fn resolves_format_blob() {
-        assert_eq!(resolve_format(b""), Some(Format::Png));
-        assert_eq!(resolve_format(&blob(&[pair("format", "png")])), Some(Format::Png));
-        assert_eq!(resolve_format(&blob(&[pair("format", "jpeg")])), Some(Format::Jpeg));
-        assert_eq!(resolve_format(&blob(&[pair("format", "qoi")])), Some(Format::Qoi));
-        assert_eq!(resolve_format(&blob(&[pair("future", "whatever")])), Some(Format::Png));
-        assert_eq!(resolve_format(&blob(&[pair("format", "ico")])), None);
-        assert_eq!(resolve_format(&blob(&[pair("format", "")])), None);
-        assert_eq!(resolve_format(&[0x02]), None);
+    fn resolves_format_and_quality_blob() {
+        assert_eq!(resolve_options(b""), Some((Format::Png, DEFAULT_QUALITY)));
+        assert_eq!(resolve_options(&blob(&[pair("format", "png")])), Some((Format::Png, DEFAULT_QUALITY)));
+        assert_eq!(resolve_options(&blob(&[pair("format", "jpeg"), pair("quality", "42")])), Some((Format::Jpeg, 42)));
+        assert_eq!(resolve_options(&blob(&[pair("format", "qoi")])), Some((Format::Qoi, DEFAULT_QUALITY)));
+        assert_eq!(resolve_options(&blob(&[pair("future", "whatever")])), Some((Format::Png, DEFAULT_QUALITY)));
+        assert_eq!(resolve_options(&blob(&[pair("format", "ico")])), None);
+        assert_eq!(resolve_options(&blob(&[pair("format", "")])), None);
+        assert_eq!(resolve_options(&blob(&[pair("quality", "0")])), None);
+        assert_eq!(resolve_options(&blob(&[pair("quality", "101")])), None);
+        assert_eq!(resolve_options(&[0x02]), None);
+    }
+
+    #[test]
+    fn jpeg_quality_changes_encoded_output() {
+        let (width, height, channels, pixels) = decode_pixels(&png_bytes(), &Color::Rgba).unwrap();
+        let frame = frame_pixels(width, height, channels, &pixels).unwrap();
+        let low = encode_image(&frame, &Format::Jpeg, MIN_QUALITY as u8).unwrap();
+        let high = encode_image(&frame, &Format::Jpeg, MAX_QUALITY as u8).unwrap();
+
+        assert_ne!(low, high);
     }
 
     #[test]
