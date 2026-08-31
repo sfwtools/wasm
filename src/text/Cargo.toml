@@ -1,0 +1,20 @@
+[package]
+authors = ["Alex Morales", "sfw.tools", "sfwtools.com"]
+description = "Measure prose with word, sentence, and paragraph counts."
+edition = "2021"
+license = "AGPL-3.0"
+name = "text"
+version = "0.1.1"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+abi = { path = "../abi" }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true
