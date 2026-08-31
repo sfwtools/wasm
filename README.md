@@ -13,6 +13,7 @@ Built by `npm run build` into `dist/<id>.wasm`.
 | `barcode` | barcode | 1D barcodes: SVG or RGBA frames (encode only). |
 | `url` | url | Percent-encode/decode URL text. |
 | `pdf` | pdf | Assemble a PDF from pages of the inputs (reorder/delete/merge/rotate/blank). |
+| `heic` | heic | Decode the first HEIC/HEIF image to an RGBA pixel frame. |
 
 ## Testing
 

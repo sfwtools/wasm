@@ -1,0 +1,24 @@
+[package]
+authors = ["Alex Morales", "sfw.tools", "sfwtools.com"]
+description = "Decode HEIC and HEIF images into RGBA pixel frames."
+edition = "2021"
+license = "AGPL-3.0"
+name = "heic"
+version = "0.1.1"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+# The package and its dependency share the name `heic`; rustdoc otherwise
+# receives two --extern candidates and cannot run the module's doctests.
+doctest = false
+
+[dependencies]
+abi = { path = "../abi" }
+heic = { version = "=0.1.6", default-features = false, features = ["fallible-alloc"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true
