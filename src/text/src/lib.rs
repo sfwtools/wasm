@@ -27,7 +27,7 @@ const MAX_INPUT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_WPM: usize = 1000;
 const MIN_WPM: usize = 1;
 const READING_WPM: usize = 200;
-const WRITING_WPM: usize = 40;
+const SPEAKING_WPM: usize = 40;
 
 /// The module's self-description as UTF-8 JSON.
 const MANIFEST: &str = r#"{
@@ -40,10 +40,10 @@ const MANIFEST: &str = r#"{
           "default": 200,
           "description": "Reading speed in words per minute (1-1000)."
         },
-        "writing_wpm": {
+        "speaking_wpm": {
           "type": "number",
           "default": 40,
-          "description": "Writing speed in words per minute (1-1000)."
+          "description": "Speaking speed in words per minute (1-1000)."
         }
       }
     }
@@ -168,29 +168,29 @@ fn duration_seconds(words: usize, words_per_minute: usize) -> usize {
 /// Resolve known options. Unknown keys are ignored for forward compatibility.
 fn resolve_options(blob: &[u8]) -> Option<(usize, usize)> {
     let mut reading_wpm = READING_WPM;
-    let mut writing_wpm = WRITING_WPM;
+    let mut speaking_wpm = SPEAKING_WPM;
 
     for (key, value) in option_pairs(blob)? {
         let parsed = match parse_usize(value) {
             Some(value) if (MIN_WPM..=MAX_WPM).contains(&value) => value,
-            _ if key == b"reading_wpm" || key == b"writing_wpm" => return None,
+            _ if key == b"reading_wpm" || key == b"speaking_wpm" => return None,
             _ => continue,
         };
 
         match key {
             b"reading_wpm" => reading_wpm = parsed,
-            b"writing_wpm" => writing_wpm = parsed,
+            b"speaking_wpm" => speaking_wpm = parsed,
             _ => {}
         }
     }
 
-    Some((reading_wpm, writing_wpm))
+    Some((reading_wpm, speaking_wpm))
 }
 
 /// Render metrics as compact JSON without pulling a JSON serialization crate
 /// into this small module. Character values are Unicode scalar values, not
 /// UTF-8 bytes or grapheme clusters.
-fn metrics_json(text: &str, reading_wpm: usize, writing_wpm: usize) -> String {
+fn metrics_json(text: &str, reading_wpm: usize, speaking_wpm: usize) -> String {
     let words_list = word_tokens(text);
     let words = words_list.len();
     let unique_words = words_list
@@ -218,7 +218,7 @@ fn metrics_json(text: &str, reading_wpm: usize, writing_wpm: usize) -> String {
         words as f64 / paragraphs as f64
     };
     let reading_time_seconds = duration_seconds(words, reading_wpm);
-    let writing_time_seconds = duration_seconds(words, writing_wpm);
+    let writing_time_seconds = duration_seconds(words, speaking_wpm);
     let pages = words as f64 / 500.0;
     let mut output = String::from("{\"words\":");
 
@@ -313,7 +313,7 @@ mod tests {
         assert_eq!(word_tokens(text).len(), 8);
         assert_eq!(count_sentences(text), 4);
         assert_eq!(count_paragraphs(text), 2);
-        assert_eq!(metrics_json(text, READING_WPM, WRITING_WPM), "{\"words\":8,\"unique_words\":7,\"characters\":60,\"characters_no_spaces\":52,\"lines\":4,\"non_empty_lines\":3,\"sentences\":4,\"paragraphs\":2,\"average_sentence_length\":2,\"average_paragraph_length\":4,\"reading_time_seconds\":3,\"writing_time_seconds\":12,\"pages\":0.016}");
+        assert_eq!(metrics_json(text, READING_WPM, SPEAKING_WPM), "{\"words\":8,\"unique_words\":7,\"characters\":60,\"characters_no_spaces\":52,\"lines\":4,\"non_empty_lines\":3,\"sentences\":4,\"paragraphs\":2,\"average_sentence_length\":2,\"average_paragraph_length\":4,\"reading_time_seconds\":3,\"writing_time_seconds\":12,\"pages\":0.016}");
     }
 
     #[test]
@@ -336,7 +336,7 @@ mod tests {
     #[test]
     fn counts_only_non_empty_paragraphs() {
         assert_eq!(count_paragraphs("\n  \nOne line\nTwo lines\n\n\nLast."), 2);
-        assert_eq!(metrics_json(" \n\t", READING_WPM, WRITING_WPM), "{\"words\":0,\"unique_words\":0,\"characters\":3,\"characters_no_spaces\":0,\"lines\":2,\"non_empty_lines\":0,\"sentences\":0,\"paragraphs\":0,\"average_sentence_length\":0,\"average_paragraph_length\":0,\"reading_time_seconds\":0,\"writing_time_seconds\":0,\"pages\":0}");
+        assert_eq!(metrics_json(" \n\t", READING_WPM, SPEAKING_WPM), "{\"words\":0,\"unique_words\":0,\"characters\":3,\"characters_no_spaces\":0,\"lines\":2,\"non_empty_lines\":0,\"sentences\":0,\"paragraphs\":0,\"average_sentence_length\":0,\"average_paragraph_length\":0,\"reading_time_seconds\":0,\"writing_time_seconds\":0,\"pages\":0}");
     }
 
     #[test]
@@ -366,8 +366,8 @@ mod tests {
     #[test]
     fn calculates_averages_durations_and_pages() {
         let json = metrics_json("One two. Three four.", 100, 50);
-        let one_sentence = metrics_json("One two.", READING_WPM, WRITING_WPM);
-        let multi_page = metrics_json(&"word ".repeat(501), READING_WPM, WRITING_WPM);
+        let one_sentence = metrics_json("One two.", READING_WPM, SPEAKING_WPM);
+        let multi_page = metrics_json(&"word ".repeat(501), READING_WPM, SPEAKING_WPM);
 
         assert!(one_sentence.contains("\"average_sentence_length\":2"));
         assert!(json.contains("\"average_sentence_length\":2"));
@@ -376,7 +376,7 @@ mod tests {
         assert!(json.contains("\"writing_time_seconds\":5"));
         assert!(json.contains("\"pages\":0.008"));
         assert!(multi_page.contains("\"pages\":1.002"));
-        assert_eq!(resolve_options(&[]), Some((READING_WPM, WRITING_WPM)));
+        assert_eq!(resolve_options(&[]), Some((READING_WPM, SPEAKING_WPM)));
         assert_eq!(resolve_options(&[1, 0, 0, 0]), None);
     }
 }

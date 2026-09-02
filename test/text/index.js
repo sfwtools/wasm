@@ -33,7 +33,7 @@ const main = async () => {
   instance.exports.dealloc(manifestResult.ptr, manifestResult.len);
 
   const input = new TextEncoder().encode('First sentence. Second sentence!\nStill here.\n\nNew paragraph?');
-  const output = runExport(instance.exports, 'metrics', input, { reading_wpm: 200, writing_wpm: 40 });
+  const output = runExport(instance.exports, 'metrics', input, { reading_wpm: 200, speaking_wpm: 40 });
 
   if(!output)
     throw new Error('metrics rejected valid text');

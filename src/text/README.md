@@ -15,7 +15,7 @@ compact UTF-8 JSON. The module imports nothing at runtime.
 metrics(inputPtr, inputLen, optsPtr, optsLen) -> u64
 ```
 
-The options blob may contain `reading_wpm` and `writing_wpm`, each an ASCII
+The options blob may contain `reading_wpm` and `speaking_wpm`, each an ASCII
 decimal integer from 1 through 1000. Defaults are 200 and 40 respectively.
 Unknown options are ignored. Invalid UTF-8, malformed options, invalid known
 options, and inputs larger than 16 MiB are rejected with result `0`.
@@ -45,8 +45,9 @@ between two alphanumeric characters is treated as a decimal point, not a
 boundary. Abbreviations are not language-detected and their periods count as
 boundaries. Average lengths are words per counted sentence or paragraph.
 
-Reading and writing durations use words per minute and round positive results
-up to the next whole second. Pages use a fixed 500 words per page and are not
+Reading and speaking durations use words per minute and round positive results
+up to the next whole second. The speaking duration is returned in the required
+`writing_time_seconds` field. Pages use a fixed 500 words per page and are not
 rounded.
 
 ## License
