@@ -33,14 +33,14 @@ const main = async () => {
   instance.exports.dealloc(manifestResult.ptr, manifestResult.len);
 
   const input = new TextEncoder().encode('First sentence. Second sentence!\nStill here.\n\nNew paragraph?');
-  const output = runExport(instance.exports, 'metrics', input);
+  const output = runExport(instance.exports, 'metrics', input, { reading_wpm: 200, writing_wpm: 40 });
 
   if(!output)
     throw new Error('metrics rejected valid text');
 
   const metrics = JSON.parse(new TextDecoder().decode(output));
 
-  if(metrics.paragraphs !== 2 || metrics.sentences !== 4 || metrics.words !== 8)
+  if(metrics.paragraphs !== 2 || metrics.sentences !== 4 || metrics.words !== 8 || metrics.unique_words !== 7 || metrics.pages !== 0.016)
     throw new Error('unexpected metrics: ' + JSON.stringify(metrics));
 
   console.log(new Date().toISOString(), 'test/text/index.js', 'main', '\u2705 ok');

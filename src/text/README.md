@@ -1,6 +1,7 @@
 # text
 
-Measure prose with word, sentence, and paragraph counts.
+Measure document text with word, character, line, sentence, paragraph, time,
+and page statistics.
 
 ## Module
 
@@ -14,20 +15,39 @@ compact UTF-8 JSON. The module imports nothing at runtime.
 metrics(inputPtr, inputLen, optsPtr, optsLen) -> u64
 ```
 
-The options blob must be empty. Invalid UTF-8, malformed options, non-empty
+The options blob may contain `reading_wpm` and `writing_wpm`, each an ASCII
+decimal integer from 1 through 1000. Defaults are 200 and 40 respectively.
+Unknown options are ignored. Invalid UTF-8, malformed options, invalid known
 options, and inputs larger than 16 MiB are rejected with result `0`.
 
 Example output:
 
 ```json
-{"paragraphs":2,"sentences":4,"words":8}
+{"words":8,"unique_words":7,"characters":60,"characters_no_spaces":52,"lines":4,"non_empty_lines":3,"sentences":4,"paragraphs":2,"average_sentence_length":2,"average_paragraph_length":4,"reading_time_seconds":3,"writing_time_seconds":12,"pages":0.016}
 ```
 
 Words are Unicode alphanumeric runs. An apostrophe or hyphen between two
-alphanumeric characters remains inside the word. Sentence counts treat runs
-of `.`, `!`, `?`, and their common CJK equivalents as one boundary. Paragraphs
-are non-empty blocks separated by one or more blank lines; a normal line break
-does not end a paragraph.
+alphanumeric characters remains inside the word. `unique_words` lowercases
+those same tokens with Rust's standard-library conversion; accents are not
+removed. `characters` and `characters_no_spaces` count Unicode scalar values,
+not UTF-8 bytes or grapheme clusters. Whitespace uses Rust's Unicode
+`is_whitespace` definition.
+
+Lines are separated by `\n`. Empty input has zero lines; otherwise a trailing
+newline creates a final empty line. `non_empty_lines` excludes lines containing
+only whitespace. Paragraphs are non-empty blocks separated by one or more blank
+lines; a normal line break does not end a paragraph.
+
+Sentence counts treat runs of `.`, `!`, `?`, and their common CJK equivalents as
+one boundary, but punctuation-only input has zero sentences. A terminator at
+the end of input or before whitespace counts when content precedes it. A period
+between two alphanumeric characters is treated as a decimal point, not a
+boundary. Abbreviations are not language-detected and their periods count as
+boundaries. Average lengths are words per counted sentence or paragraph.
+
+Reading and writing durations use words per minute and round positive results
+up to the next whole second. Pages use a fixed 500 words per page and are not
+rounded.
 
 ## License
 

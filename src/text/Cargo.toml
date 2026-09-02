@@ -4,7 +4,7 @@ description = "Measure prose with word, sentence, and paragraph counts."
 edition = "2021"
 license = "AGPL-3.0"
 name = "text"
-version = "0.1.1"
+version = "0.1.2"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
