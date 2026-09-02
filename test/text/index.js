@@ -40,7 +40,7 @@ const main = async () => {
 
   const metrics = JSON.parse(new TextDecoder().decode(output));
 
-  if(metrics.paragraphs !== 2 || metrics.sentences !== 4 || metrics.words !== 8 || metrics.unique_words !== 7 || metrics.pages !== 0.016)
+  if(metrics.paragraphs !== 2 || metrics.sentences !== 4 || metrics.words !== 8 || metrics.unique_words !== 7 || metrics.pages !== 0.022 || metrics.approximate_tokens !== 12)
     throw new Error('unexpected metrics: ' + JSON.stringify(metrics));
 
   console.log(new Date().toISOString(), 'test/text/index.js', 'main', '\u2705 ok');
