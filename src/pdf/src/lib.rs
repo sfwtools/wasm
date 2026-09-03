@@ -471,7 +471,10 @@ fn assemble_pdf(
     }
 
     // Build the output page tree root first, so every copied page can point at
-    // a real Parent.
+    // a real Parent. The copied source objects were inserted directly, so keep
+    // lopdf's allocator above their highest ID or new page objects overwrite
+    // source XObjects and content streams.
+    out.max_id = max_id;
     let pages_id = out.new_object_id();
     let catalog_id = out.new_object_id();
 
