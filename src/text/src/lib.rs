@@ -17,12 +17,11 @@
 //! text - measure prose with document statistics.
 //!
 //! The module accepts UTF-8 text and returns a small JSON object through the
-//! shared raw ABI. It uses the embedded cl100k_base vocabulary for token counts.
+//! shared raw ABI. Token counts use a dependency-free character estimate.
 
 use std::collections::HashSet;
 
 use abi::{option_pairs, parse_usize};
-use tiktoken::get_encoding;
 
 const MAX_INPUT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_WPM: usize = 1000;
@@ -230,9 +229,7 @@ fn metrics_json(text: &str, reading_wpm: usize, speaking_wpm: usize) -> String {
     let reading_time_seconds = duration_seconds(effective_words, reading_wpm);
     let speaking_time_seconds = duration_seconds(effective_words, speaking_wpm);
     let pages = effective_words as f64 / 500.0;
-    let approximate_tokens = get_encoding("cl100k_base")
-        .map(|encoding| encoding.count(text))
-        .unwrap_or(0);
+    let approximate_tokens = characters.div_ceil(4);
     let mut output = String::from("{\"words\":");
 
     output.push_str(&words.to_string());
@@ -328,7 +325,7 @@ mod tests {
         assert_eq!(word_tokens(text).len(), 8);
         assert_eq!(count_sentences(text), 4);
         assert_eq!(count_paragraphs(text), 2);
-        assert_eq!(metrics_json(text, READING_WPM, SPEAKING_WPM), "{\"words\":8,\"unique_words\":7,\"characters\":60,\"characters_no_spaces\":52,\"lines\":4,\"non_empty_lines\":3,\"sentences\":4,\"paragraphs\":2,\"average_sentence_length\":2,\"average_paragraph_length\":4,\"reading_time_seconds\":4,\"speaking_time_seconds\":17,\"pages\":0.022,\"approximate_tokens\":12}");
+        assert_eq!(metrics_json(text, READING_WPM, SPEAKING_WPM), "{\"words\":8,\"unique_words\":7,\"characters\":60,\"characters_no_spaces\":52,\"lines\":4,\"non_empty_lines\":3,\"sentences\":4,\"paragraphs\":2,\"average_sentence_length\":2,\"average_paragraph_length\":4,\"reading_time_seconds\":4,\"speaking_time_seconds\":17,\"pages\":0.022,\"approximate_tokens\":15}");
     }
 
     #[test]
@@ -351,7 +348,7 @@ mod tests {
     #[test]
     fn counts_only_non_empty_paragraphs() {
         assert_eq!(count_paragraphs("\n  \nOne line\nTwo lines\n\n\nLast."), 2);
-        assert_eq!(metrics_json(" \n\t", READING_WPM, SPEAKING_WPM), "{\"words\":0,\"unique_words\":0,\"characters\":3,\"characters_no_spaces\":0,\"lines\":2,\"non_empty_lines\":0,\"sentences\":0,\"paragraphs\":0,\"average_sentence_length\":0,\"average_paragraph_length\":0,\"reading_time_seconds\":0,\"speaking_time_seconds\":0,\"pages\":0,\"approximate_tokens\":2}");
+        assert_eq!(metrics_json(" \n\t", READING_WPM, SPEAKING_WPM), "{\"words\":0,\"unique_words\":0,\"characters\":3,\"characters_no_spaces\":0,\"lines\":2,\"non_empty_lines\":0,\"sentences\":0,\"paragraphs\":0,\"average_sentence_length\":0,\"average_paragraph_length\":0,\"reading_time_seconds\":0,\"speaking_time_seconds\":0,\"pages\":0,\"approximate_tokens\":1}");
     }
 
     #[test]
@@ -396,7 +393,7 @@ mod tests {
         let long_word = metrics_json("antidisestablishmentarianism", READING_WPM, SPEAKING_WPM);
         assert!(long_word.contains("\"reading_time_seconds\":2"));
         assert!(long_word.contains("\"pages\":0.012"));
-        assert!(long_word.contains("\"approximate_tokens\":"));
+        assert!(long_word.contains("\"approximate_tokens\":7"));
         assert_eq!(resolve_options(&[]), Some((READING_WPM, SPEAKING_WPM)));
         assert_eq!(resolve_options(&[1, 0, 0, 0]), None);
     }

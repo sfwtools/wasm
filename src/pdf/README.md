@@ -92,7 +92,8 @@ Examples:
 Out-of-range file/page indices, a bad rotation, malformed JSON, or an empty
 selection are all rejected (result `0`); a request never produces a partial
 document. Page order follows the selection exactly. Each source PDF's own
-MediaBox and resources are preserved; explicit blank pages use the requested
+inherited or direct MediaBox, CropBox, Rotate, and Resources are preserved;
+explicit blank pages use the requested
 MediaBox; outlines are dropped (their cross-doc references cannot survive a
 rebuild).
 

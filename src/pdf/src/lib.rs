@@ -57,7 +57,12 @@ enum Entry {
     Page { file: usize, page: usize },
     /// A blank page. Source references inherit that page's MediaBox; explicit
     /// dimensions are integer PDF points.
-    Blank { file: Option<usize>, page: Option<usize>, width: Option<u32>, height: Option<u32> },
+    Blank {
+        file: Option<usize>,
+        page: Option<usize>,
+        width: Option<u32>,
+        height: Option<u32>,
+    },
 }
 
 const DEFAULT_PAGE_HEIGHT: u32 = 792;
@@ -116,7 +121,10 @@ impl Rotation {
 /// partial document. This is deliberately a minimal parser for exactly this
 /// shape - no floats, no objects, no escapes beyond what an integer can hold.
 fn parse_pages(pages: &[u8]) -> Option<Vec<(Entry, Rotation)>> {
-    let mut p = JsonCursor { bytes: pages, pos: 0 };
+    let mut p = JsonCursor {
+        bytes: pages,
+        pos: 0,
+    };
 
     p.skip_ws();
     p.expect(b'[')?;
@@ -157,7 +165,15 @@ fn parse_pages(pages: &[u8]) -> Option<Vec<(Entry, Rotation)>> {
                 return None;
             }
 
-            (Entry::Blank { file: None, page: None, width: None, height: None }, Rotation::Zero)
+            (
+                Entry::Blank {
+                    file: None,
+                    page: None,
+                    width: None,
+                    height: None,
+                },
+                Rotation::Zero,
+            )
         } else if is_blank_array(&p) {
             // An explicit blank page: ["blank", width, height].
             p.expect(b'[')?;
@@ -176,7 +192,15 @@ fn parse_pages(pages: &[u8]) -> Option<Vec<(Entry, Rotation)>> {
             p.skip_ws();
             p.expect(b']')?;
 
-            (Entry::Blank { file: None, page: None, width: Some(width), height: Some(height) }, Rotation::Zero)
+            (
+                Entry::Blank {
+                    file: None,
+                    page: None,
+                    width: Some(width),
+                    height: Some(height),
+                },
+                Rotation::Zero,
+            )
         } else {
             // A page entry: [file, page, rotate?].
             p.expect(b'[')?;
@@ -200,7 +224,15 @@ fn parse_pages(pages: &[u8]) -> Option<Vec<(Entry, Rotation)>> {
                     if p.read_string()? != b"blank" {
                         return None;
                     }
-                    special_entry = Some((Entry::Blank { file: Some(file), page: Some(page), width: None, height: None }, Rotation::Zero));
+                    special_entry = Some((
+                        Entry::Blank {
+                            file: Some(file),
+                            page: Some(page),
+                            width: None,
+                            height: None,
+                        },
+                        Rotation::Zero,
+                    ));
                 } else {
                     rotation = Rotation::parse(&p.read_token()?)?;
                 }
@@ -227,7 +259,10 @@ fn parse_pages(pages: &[u8]) -> Option<Vec<(Entry, Rotation)>> {
 
 /// Detect an explicit blank array without consuming the real cursor.
 fn is_blank_array(p: &JsonCursor) -> bool {
-    let mut probe = JsonCursor { bytes: p.bytes, pos: p.pos };
+    let mut probe = JsonCursor {
+        bytes: p.bytes,
+        pos: p.pos,
+    };
 
     probe.expect(b'[');
     probe.skip_ws();
@@ -276,7 +311,9 @@ impl<'a> JsonCursor<'a> {
         let mut value = 0usize;
 
         for &digit in token {
-            value = value.checked_mul(10)?.checked_add((digit - b'0') as usize)?;
+            value = value
+                .checked_mul(10)?
+                .checked_add((digit - b'0') as usize)?;
         }
 
         Some(value)
@@ -287,7 +324,10 @@ impl<'a> JsonCursor<'a> {
         let start = self.pos;
 
         while let Some(byte) = self.peek() {
-            if matches!(byte, b'[' | b']' | b',' | b'"' | b' ' | b'\t' | b'\r' | b'\n') {
+            if matches!(
+                byte,
+                b'[' | b']' | b',' | b'"' | b' ' | b'\t' | b'\r' | b'\n'
+            ) {
                 break;
             }
 
@@ -317,12 +357,66 @@ impl<'a> JsonCursor<'a> {
     }
 }
 
+/// Find the first page attribute on a page or one of its `/Pages` ancestors.
+/// lopdf exposes resource inheritance separately, but these page attributes
+/// share the same parent-chain rule and must be materialized before the source
+/// page tree is discarded.
+fn inherited_page_attribute(doc: &Document, page_id: ObjectId, key: &[u8]) -> Option<Object> {
+    let mut current = page_id;
+    let mut seen = std::collections::BTreeSet::new();
+
+    while seen.insert(current) {
+        let dict = doc.get_dictionary(current).ok()?;
+
+        if let Ok(value) = dict.get(key) {
+            return Some(value.clone());
+        }
+
+        current = dict.get(b"Parent").ok()?.as_reference().ok()?;
+    }
+
+    None
+}
+
+/// Copy inheritable page attributes onto every page while the original page
+/// tree is still available. The new output tree has a fresh root, so leaving
+/// these values on discarded ancestors would make otherwise valid content
+/// invisible after export.
+fn materialize_page_attributes(doc: &mut Document, page_order: &[ObjectId]) {
+    const ATTRIBUTES: &[&[u8]] = &[b"Resources", b"MediaBox", b"CropBox", b"Rotate"];
+    let inherited: Vec<(ObjectId, Vec<(&[u8], Object)>)> = page_order
+        .iter()
+        .map(|page_id| {
+            let values = ATTRIBUTES
+                .iter()
+                .filter_map(|key| {
+                    inherited_page_attribute(doc, *page_id, key).map(|value| (*key, value))
+                })
+                .collect();
+            (*page_id, values)
+        })
+        .collect();
+
+    for (page_id, values) in inherited {
+        if let Ok(dict) = doc.get_dictionary_mut(page_id) {
+            for (key, value) in values {
+                if !dict.has(key) {
+                    dict.set(key, value);
+                }
+            }
+        }
+    }
+}
+
 /// Assemble a new PDF from the input files and page selection. Each source
 /// document is loaded, its non-page objects merged into one output document,
 /// then the output page tree is rebuilt to contain exactly the selected pages
 /// in order (blank pages created as empty Letter pages). Returns the assembled
 /// PDF bytes.
-fn assemble_pdf(files: &[(Vec<u8>, Vec<u8>)], pages: &[(Entry, Rotation)]) -> Result<Vec<u8>, &'static str> {
+fn assemble_pdf(
+    files: &[(Vec<u8>, Vec<u8>)],
+    pages: &[(Entry, Rotation)],
+) -> Result<Vec<u8>, &'static str> {
     if files.is_empty() {
         return Err("no input files");
     }
@@ -356,6 +450,7 @@ fn assemble_pdf(files: &[(Vec<u8>, Vec<u8>)], pages: &[(Entry, Rotation)]) -> Re
         max_id = source.max_id + 1;
 
         let order: Vec<ObjectId> = source.page_iter().collect();
+        materialize_page_attributes(source, &order);
         let mut pages = std::collections::BTreeMap::new();
 
         for (id, object) in std::mem::take(&mut source.objects) {
@@ -404,17 +499,40 @@ fn assemble_pdf(files: &[(Vec<u8>, Vec<u8>)], pages: &[(Entry, Rotation)]) -> Re
 
     for (entry, rotation) in pages {
         match entry {
-            Entry::Blank { file, page, width, height } => {
+            Entry::Blank {
+                file,
+                page,
+                width,
+                height,
+            } => {
                 let page_id = out.new_object_id();
                 let media_box = match (width, height) {
-                    (Some(width), Some(height)) => vec![0.into(), 0.into(), (*width).into(), (*height).into()].into(),
+                    (Some(width), Some(height)) => {
+                        vec![0.into(), 0.into(), (*width).into(), (*height).into()].into()
+                    }
                     _ => file
-                    .and_then(|file| page.and_then(|page| page_order.get(file).and_then(|order| order.get(page).copied())))
-                    .and_then(|page_id| page_objects.iter().find_map(|pages| pages.get(&page_id)))
-                    .and_then(|object| object.as_dict().ok())
-                    .and_then(|dict| dict.get(b"MediaBox").ok())
-                    .cloned()
-                    .unwrap_or_else(|| vec![0.into(), 0.into(), DEFAULT_PAGE_WIDTH.into(), DEFAULT_PAGE_HEIGHT.into()].into()),
+                        .and_then(|file| {
+                            page.and_then(|page| {
+                                page_order
+                                    .get(file)
+                                    .and_then(|order| order.get(page).copied())
+                            })
+                        })
+                        .and_then(|page_id| {
+                            page_objects.iter().find_map(|pages| pages.get(&page_id))
+                        })
+                        .and_then(|object| object.as_dict().ok())
+                        .and_then(|dict| dict.get(b"MediaBox").ok())
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            vec![
+                                0.into(),
+                                0.into(),
+                                DEFAULT_PAGE_WIDTH.into(),
+                                DEFAULT_PAGE_HEIGHT.into(),
+                            ]
+                            .into()
+                        }),
                 };
 
                 out.set_object(
@@ -433,7 +551,9 @@ fn assemble_pdf(files: &[(Vec<u8>, Vec<u8>)], pages: &[(Entry, Rotation)]) -> Re
 
                 // Copy the page object into the output, reparented to the new
                 // tree and rotated as requested.
-                let object = page_objects[*file].get(&page_id).ok_or("page object missing")?;
+                let object = page_objects[*file]
+                    .get(&page_id)
+                    .ok_or("page object missing")?;
                 let mut dict = object
                     .as_dict()
                     .map_err(|_| "page object is not a dictionary")?
@@ -465,7 +585,8 @@ fn assemble_pdf(files: &[(Vec<u8>, Vec<u8>)], pages: &[(Entry, Rotation)]) -> Re
     );
 
     let mut bytes = Vec::new();
-    out.save_to(&mut bytes).map_err(|_| "unable to write the output PDF")?;
+    out.save_to(&mut bytes)
+        .map_err(|_| "unable to write the output PDF")?;
 
     Ok(bytes)
 }
@@ -518,7 +639,10 @@ pub unsafe extern "C" fn assemble(ptr: u32, len: u32, opts_ptr: u32, opts_len: u
     let frame = std::slice::from_raw_parts(ptr as *const u8, len as usize);
 
     let files: Vec<(Vec<u8>, Vec<u8>)> = match parse_files(frame) {
-        Some(files) => files.into_iter().map(|(n, d)| (n.to_vec(), d.to_vec())).collect(),
+        Some(files) => files
+            .into_iter()
+            .map(|(n, d)| (n.to_vec(), d.to_vec()))
+            .collect(),
         None => return 0,
     };
 
@@ -592,7 +716,10 @@ mod tests {
                 lopdf::content::Operation::new("ET", vec![]),
             ],
         };
-        let content_id = doc.add_object(lopdf::Stream::new(dictionary! {}, content.encode().unwrap()));
+        let content_id = doc.add_object(lopdf::Stream::new(
+            dictionary! {},
+            content.encode().unwrap(),
+        ));
         let page_id = doc.add_object(dictionary! {
             "Type" => "Page",
             "Parent" => pages_id,
@@ -616,6 +743,60 @@ mod tests {
         bytes
     }
 
+    fn make_inherited_pdf() -> Vec<u8> {
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        let font_id = doc.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "Courier",
+        });
+        let resources_id = doc.add_object(dictionary! {
+            "Font" => dictionary! {
+                "F1" => font_id,
+            },
+        });
+        let content = lopdf::content::Content {
+            operations: vec![
+                lopdf::content::Operation::new("BT", vec![]),
+                lopdf::content::Operation::new("Tf", vec!["F1".into(), 48.into()]),
+                lopdf::content::Operation::new("Td", vec![100.into(), 600.into()]),
+                lopdf::content::Operation::new("Tj", vec![Object::string_literal("inherited")]),
+                lopdf::content::Operation::new("ET", vec![]),
+            ],
+        };
+        let content_id = doc.add_object(lopdf::Stream::new(
+            dictionary! {},
+            content.encode().unwrap(),
+        ));
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "Contents" => content_id,
+        });
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![page_id.into()],
+                "Count" => 1,
+                "Resources" => resources_id,
+                "MediaBox" => vec![0.into(), 0.into(), 1000.into(), 500.into()],
+                "CropBox" => vec![0.into(), 0.into(), 900.into(), 400.into()],
+                "Rotate" => 90,
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        doc.trailer.set("Root", catalog_id);
+
+        let mut bytes = Vec::new();
+        doc.save_to(&mut bytes).unwrap();
+        bytes
+    }
+
     #[test]
     fn parse_pages_basic_entries() {
         assert_eq!(
@@ -623,8 +804,24 @@ mod tests {
             Some(vec![
                 (Entry::Page { file: 0, page: 1 }, Rotation::Zero),
                 (Entry::Page { file: 0, page: 2 }, Rotation::Ninety),
-                (Entry::Blank { file: None, page: None, width: Some(612), height: Some(792) }, Rotation::Zero),
-                (Entry::Blank { file: None, page: None, width: None, height: None }, Rotation::Zero),
+                (
+                    Entry::Blank {
+                        file: None,
+                        page: None,
+                        width: Some(612),
+                        height: Some(792)
+                    },
+                    Rotation::Zero
+                ),
+                (
+                    Entry::Blank {
+                        file: None,
+                        page: None,
+                        width: None,
+                        height: None
+                    },
+                    Rotation::Zero
+                ),
             ])
         );
     }
@@ -632,14 +829,25 @@ mod tests {
     #[test]
     fn parse_pages_whitespace_and_empty() {
         assert_eq!(parse_pages(b"[]"), Some(vec![]));
-        assert_eq!(parse_pages(b"  [ [ 0 , 1 ] ]  "), Some(vec![(Entry::Page { file: 0, page: 1 }, Rotation::Zero)]));
+        assert_eq!(
+            parse_pages(b"  [ [ 0 , 1 ] ]  "),
+            Some(vec![(Entry::Page { file: 0, page: 1 }, Rotation::Zero)])
+        );
     }
 
     #[test]
     fn parse_pages_source_sized_blank() {
         assert_eq!(
             parse_pages(b"[[0,0,\"blank\"]]"),
-            Some(vec![(Entry::Blank { file: Some(0), page: Some(0), width: None, height: None }, Rotation::Zero)])
+            Some(vec![(
+                Entry::Blank {
+                    file: Some(0),
+                    page: Some(0),
+                    width: None,
+                    height: None
+                },
+                Rotation::Zero
+            )])
         );
     }
 
@@ -649,11 +857,11 @@ mod tests {
         assert_eq!(parse_pages(b"[0,1]"), None);
         assert_eq!(parse_pages(b"[[0]]"), None);
         assert_eq!(parse_pages(b"[[0,1,2]]"), None); // No rotate=2.
-        assert_eq!(parse_pages(b"[[0,-1]]"), None);  // No negative pages.
-        assert_eq!(parse_pages(b"[[0,1],]"), None);  // Trailing comma.
+        assert_eq!(parse_pages(b"[[0,-1]]"), None); // No negative pages.
+        assert_eq!(parse_pages(b"[[0,1],]"), None); // Trailing comma.
         assert_eq!(parse_pages(b"[\"x\"]"), None);
-        assert_eq!(parse_pages(b"[[0,1]"), None);    // Unclosed.
-        assert_eq!(parse_pages(b"[[0,1]]x"), None);  // Trailing garbage.
+        assert_eq!(parse_pages(b"[[0,1]"), None); // Unclosed.
+        assert_eq!(parse_pages(b"[[0,1]]x"), None); // Trailing garbage.
         assert_eq!(parse_pages(b"[[\"blank\",612,0]]"), None); // Zero dimension.
         assert_eq!(parse_pages(b"[[\"blank\",14401,792]]"), None); // Excessive dimension.
         assert_eq!(parse_pages(b"[[\"blank\",612]]"), None); // Missing height.
@@ -662,10 +870,28 @@ mod tests {
 
     #[test]
     fn parse_pages_all_rotations() {
-        assert_eq!(parse_pages(b"[[0,0,0]]"), Some(vec![(Entry::Page { file: 0, page: 0 }, Rotation::Zero)]));
-        assert_eq!(parse_pages(b"[[0,0,90]]"), Some(vec![(Entry::Page { file: 0, page: 0 }, Rotation::Ninety)]));
-        assert_eq!(parse_pages(b"[[0,0,180]]"), Some(vec![(Entry::Page { file: 0, page: 0 }, Rotation::OneEighty)]));
-        assert_eq!(parse_pages(b"[[0,0,270]]"), Some(vec![(Entry::Page { file: 0, page: 0 }, Rotation::TwoSeventy)]));
+        assert_eq!(
+            parse_pages(b"[[0,0,0]]"),
+            Some(vec![(Entry::Page { file: 0, page: 0 }, Rotation::Zero)])
+        );
+        assert_eq!(
+            parse_pages(b"[[0,0,90]]"),
+            Some(vec![(Entry::Page { file: 0, page: 0 }, Rotation::Ninety)])
+        );
+        assert_eq!(
+            parse_pages(b"[[0,0,180]]"),
+            Some(vec![(
+                Entry::Page { file: 0, page: 0 },
+                Rotation::OneEighty
+            )])
+        );
+        assert_eq!(
+            parse_pages(b"[[0,0,270]]"),
+            Some(vec![(
+                Entry::Page { file: 0, page: 0 },
+                Rotation::TwoSeventy
+            )])
+        );
     }
 
     #[test]
@@ -681,7 +907,15 @@ mod tests {
     fn assemble_pdf_blank_page_round_trip() {
         let pdf = make_pdf("hello");
         let files = vec![(b"a.pdf".to_vec(), pdf.clone())];
-        let pages = vec![(Entry::Blank { file: None, page: None, width: None, height: None }, Rotation::Zero)];
+        let pages = vec![(
+            Entry::Blank {
+                file: None,
+                page: None,
+                width: None,
+                height: None,
+            },
+            Rotation::Zero,
+        )];
 
         let bytes = assemble_pdf(&files, &pages).expect("assemble");
         let out = Document::load_mem(&bytes).expect("load output");
@@ -697,14 +931,25 @@ mod tests {
     fn assemble_pdf_custom_blank_page_uses_dimensions() {
         let pdf = make_pdf("hello");
         let files = vec![(b"a.pdf".to_vec(), pdf)];
-        let pages = vec![(Entry::Blank { file: None, page: None, width: Some(1000), height: Some(500) }, Rotation::Zero)];
+        let pages = vec![(
+            Entry::Blank {
+                file: None,
+                page: None,
+                width: Some(1000),
+                height: Some(500),
+            },
+            Rotation::Zero,
+        )];
 
         let bytes = assemble_pdf(&files, &pages).expect("assemble");
         let out = Document::load_mem(&bytes).expect("load output");
         let page_id = out.get_pages().get(&1).copied().expect("page 1");
         let dict = out.get_object(page_id).unwrap().as_dict().unwrap();
 
-        assert_eq!(dict.get(b"MediaBox").unwrap(), &vec![0.into(), 0.into(), 1000.into(), 500.into()].into());
+        assert_eq!(
+            dict.get(b"MediaBox").unwrap(),
+            &vec![0.into(), 0.into(), 1000.into(), 500.into()].into()
+        );
         assert!(!dict.has(b"Contents"));
     }
 
@@ -736,7 +981,10 @@ mod tests {
                     lopdf::content::Operation::new("ET", vec![]),
                 ],
             };
-            let content_id = doc.add_object(lopdf::Stream::new(dictionary! {}, content.encode().unwrap()));
+            let content_id = doc.add_object(lopdf::Stream::new(
+                dictionary! {},
+                content.encode().unwrap(),
+            ));
             let page_id = doc.add_object(dictionary! {
                 "Type" => "Page",
                 "Parent" => pages_id,
@@ -789,7 +1037,52 @@ mod tests {
         let second = out.get_object(page_ids[1]).unwrap().as_dict().unwrap();
 
         assert_ne!(page_ids[0], page_ids[1]);
-        assert_eq!(first.get(b"MediaBox").unwrap(), second.get(b"MediaBox").unwrap());
+        assert_eq!(
+            first.get(b"MediaBox").unwrap(),
+            second.get(b"MediaBox").unwrap()
+        );
+    }
+
+    #[test]
+    fn assemble_pdf_materializes_inherited_page_attributes() {
+        let pdf = make_inherited_pdf();
+        let files = vec![(b"inherited.pdf".to_vec(), pdf)];
+        let pages = vec![
+            (Entry::Page { file: 0, page: 0 }, Rotation::Zero),
+            (Entry::Page { file: 0, page: 0 }, Rotation::Ninety),
+            (
+                Entry::Blank {
+                    file: Some(0),
+                    page: Some(0),
+                    width: None,
+                    height: None,
+                },
+                Rotation::Zero,
+            ),
+        ];
+
+        let bytes = assemble_pdf(&files, &pages).expect("assemble");
+        let out = Document::load_mem(&bytes).expect("load output");
+        let page_ids: Vec<ObjectId> = out.get_pages().values().copied().collect();
+        let first = out.get_object(page_ids[0]).unwrap().as_dict().unwrap();
+        let second = out.get_object(page_ids[1]).unwrap().as_dict().unwrap();
+        let blank = out.get_object(page_ids[2]).unwrap().as_dict().unwrap();
+
+        assert!(first.has(b"Resources"));
+        assert_eq!(
+            first.get(b"MediaBox").unwrap(),
+            &vec![0.into(), 0.into(), 1000.into(), 500.into()].into()
+        );
+        assert_eq!(
+            first.get(b"CropBox").unwrap(),
+            &vec![0.into(), 0.into(), 900.into(), 400.into()].into()
+        );
+        assert_eq!(first.get(b"Rotate").and_then(Object::as_i64).unwrap(), 90);
+        assert_eq!(second.get(b"Rotate").and_then(Object::as_i64).unwrap(), 180);
+        assert_eq!(
+            blank.get(b"MediaBox").unwrap(),
+            &vec![0.into(), 0.into(), 1000.into(), 500.into()].into()
+        );
     }
 
     #[test]
@@ -810,8 +1103,16 @@ mod tests {
         let pdf = make_pdf("hello");
         let files = vec![(b"a.pdf".to_vec(), pdf)];
 
-        assert!(assemble_pdf(&files, &[(Entry::Page { file: 0, page: 5 }, Rotation::Zero)]).is_err());
-        assert!(assemble_pdf(&files, &[(Entry::Page { file: 1, page: 0 }, Rotation::Zero)]).is_err());
+        assert!(assemble_pdf(
+            &files,
+            &[(Entry::Page { file: 0, page: 5 }, Rotation::Zero)]
+        )
+        .is_err());
+        assert!(assemble_pdf(
+            &files,
+            &[(Entry::Page { file: 1, page: 0 }, Rotation::Zero)]
+        )
+        .is_err());
     }
 
     #[test]
@@ -820,10 +1121,7 @@ mod tests {
             resolve_options(&blob(&[pair("pages", "[[0,0,90]]")])),
             Some(vec![(Entry::Page { file: 0, page: 0 }, Rotation::Ninety)])
         );
-        assert_eq!(
-            resolve_options(&blob(&[pair("pages", "[")])),
-            None
-        );
+        assert_eq!(resolve_options(&blob(&[pair("pages", "[")])), None);
         assert_eq!(
             resolve_options(&blob(&[pair("future", "x"), pair("pages", "[]")])),
             Some(vec![])

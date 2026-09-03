@@ -1,16 +1,17 @@
 [package]
 authors = ["Alex Morales", "sfw.tools", "sfwtools.com"]
-description = "Measure prose with word, sentence, and paragraph counts."
+description = "Calculate date and time differences and calendar arithmetic."
 edition = "2021"
 license = "AGPL-3.0"
-name = "text"
-version = "0.1.8"
+name = "date_time"
+version = "0.1.0"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 abi = { path = "../abi" }
+chrono = { version = "0.4.45", default-features = false, features = ["std"] }
 
 [profile.release]
 codegen-units = 1

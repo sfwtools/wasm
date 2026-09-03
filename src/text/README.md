@@ -1,7 +1,7 @@
 # text
 
 Measure document text with word, character, line, sentence, paragraph, time,
-page, and model-token statistics.
+page, and approximate-token statistics.
 
 ## Module
 
@@ -23,7 +23,7 @@ options, and inputs larger than 16 MiB are rejected with result `0`.
 Example output:
 
 ```json
-{"words":8,"unique_words":7,"characters":60,"characters_no_spaces":52,"lines":4,"non_empty_lines":3,"sentences":4,"paragraphs":2,"average_sentence_length":2,"average_paragraph_length":4,"reading_time_seconds":4,"speaking_time_seconds":17,"pages":0.022,"approximate_tokens":12}
+{"words":8,"unique_words":7,"characters":60,"characters_no_spaces":52,"lines":4,"non_empty_lines":3,"sentences":4,"paragraphs":2,"average_sentence_length":2,"average_paragraph_length":4,"reading_time_seconds":4,"speaking_time_seconds":17,"pages":0.022,"approximate_tokens":15}
 ```
 
 Words are Unicode alphanumeric runs. An apostrophe or hyphen between two
@@ -53,9 +53,9 @@ keeps long words from making estimates too small. Durations round positive
 results up to the next whole second. Pages use the same effective word count,
 with a fixed 500 effective words per page, and are not rounded.
 
-`approximate_tokens` is counted with the embedded OpenAI `cl100k_base`
-tiktoken vocabulary. It is exact for that encoding but only an approximation
-for other LLMs, whose tokenizers may differ.
+`approximate_tokens` is `ceil(characters / 4)`, where `characters` counts
+Unicode scalar values. It is a rough estimate only; actual token counts vary
+by model and tokenizer.
 
 ## License
 
